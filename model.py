@@ -12,7 +12,7 @@ import numpy as np
 from operations import OPERATIONS_ENCODER, MultiheadAttention, SinusoidalPositionalEmbedding, TransformerFFNLayer
 from parametrizations import weight_norm
 from text.symbols import symbols
-from torch import ModuleDict, Tensor, expm1, nn
+from torch import nn
 import torchaudio
 from dataset import NS2VCDataset, TextAudioCollate
 import modules.commons as commons
@@ -20,7 +20,6 @@ from accelerate import Accelerator
 from ema_pytorch import EMA
 from accelerate import DistributedDataParallelKwargs
 import math
-from multiprocessing import cpu_count
 from pathlib import Path
 from collections import namedtuple
 from torch.utils.tensorboard import SummaryWriter
@@ -270,7 +269,61 @@ def pad(input_ele, mel_max_length=None):
         out_list.append(one_batch_padded)
     out_padded = torch.stack(out_list)
     return out_padded
-
+class DurationPredictor(nn.Module):
+    def __init__(self,
+        in_channels=512,
+        hidden_channels=512,
+        out_channels=1,
+        attention_layers=10,
+        n_heads=8,
+        p_dropout=0.5,):
+        super().__init__()
+        self.conv_blocks = nn.ModuleList()
+        self.attn_blocks = nn.ModuleList()
+        self.norm = nn.ModuleList()
+        self.act = nn.ModuleList()
+        self.n_heads = n_heads
+        self.p_dropout = p_dropout
+        self.pre = ConvLayer(in_channels, hidden_channels, kernel_size=3, dropout=p_dropout)
+        self.prompt_norm = LayerNorm(hidden_channels)
+        for _ in range(attention_layers):
+            self.conv_blocks.append(nn.ModuleList([
+                EncConvLayer(hidden_channels, kernel_size=3, dropout=p_dropout),
+                EncConvLayer(hidden_channels, kernel_size=3, dropout=p_dropout),
+                EncConvLayer(hidden_channels, kernel_size=3, dropout=p_dropout),
+            ]))
+            self.norm.append(LayerNorm(hidden_channels))
+            self.attn_blocks.append(
+                MultiheadAttention(hidden_channels, n_heads, dropout=p_dropout, bias=False)
+            )
+        self.proj = ConvLayer(hidden_channels, out_channels, kernel_size=3, dropout=p_dropout)
+    # MultiHeadAttention 
+    def forward(self, x, prompt, x_lengths, prompt_lengths):
+        assert torch.isnan(x).any() == False
+        x = x.detach()
+        prompt = prompt.detach()
+        x_mask = ~commons.sequence_mask(x_lengths, x.size(0)).to(torch.bool)
+        prompt_mask = ~commons.sequence_mask(prompt_lengths, prompt.size(0)).to(torch.bool)
+        prompt = self.prompt_norm(prompt)
+        x = self.pre(x, x_mask)
+        x = x.masked_fill(x_mask.t().unsqueeze(-1), 0)
+        prompt = prompt.masked_fill(prompt_mask.t().unsqueeze(-1), 0)
+        cross_mask = ~einsum('b j, b k -> b j k', ~x_mask, ~prompt_mask).view(x.shape[1], 1, x_mask.shape[1], prompt_mask.shape[1]).   \
+            expand(-1, self.n_heads, -1, -1).reshape(x.shape[1] * self.n_heads, x_mask.shape[1], prompt_mask.shape[1])
+        assert torch.isnan(x).any() == False
+        for i in range(len(self.conv_blocks)):
+            for conv in self.conv_blocks[i]:
+                x = conv(x, x_mask)
+            x = self.norm[i](x)
+            residual = self.attn_blocks[i](x, prompt, prompt, key_padding_mask = prompt_mask)[0]
+            assert torch.isnan(residual).any() == False
+            x = x + residual
+        assert torch.isnan(x).any() == False
+        x = x.masked_fill(x_mask.t().unsqueeze(-1), 0)
+        x = self.proj(x, x_mask)
+        x = x.masked_fill(x_mask.t().unsqueeze(-1), 0)
+        x = rearrange(x, 't b c -> b c t')
+        return x.squeeze(1)
 class Pre_model(nn.Module):
     def __init__(self, cfg) -> None:
         super().__init__()
