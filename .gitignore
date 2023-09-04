@@ -1,0 +1,11 @@
+**/*.pyc
+**/*.wav
+settings.json
+**/*.npy
+**/*.pt
+**/events.*
+*/*.json
+logs/*
+vctk/*
+dataset_processed/*
+dataset/*
