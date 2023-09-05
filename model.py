@@ -15,7 +15,7 @@ from parametrizations import weight_norm
 from text.symbols import symbols
 from torch import nn
 import torchaudio
-from dataset import NS2VCDataset, TextAudioCollate
+from dataset import NS2VCDataset, TextAudioCollate, TextAudioDataset
 import modules.commons as commons
 from accelerate import Accelerator
 from ema_pytorch import EMA
@@ -751,15 +751,10 @@ class Trainer(object):
         self.train_num_steps = self.cfg['train']['train_num_steps']
 
         # dataset and dataloader
-        train_dataset = TextAudioSpeakerLoader(self.cfg)
-        train_sampler = DistributedBucketSampler(
-            train_dataset,
-            self.cfg['train']['batch_size'],
-            [32, 300, 400, 500, 600, 700, 800, 900, 1000])
-        collate_fn = TextAudioSpeakerCollate()
+        train_dataset = TextAudioDataset(self.cfg)
+        collate_fn = TextAudioCollate()
         dl = DataLoader(train_dataset, num_workers=24, shuffle=False, pin_memory=True,
-                                collate_fn=collate_fn, batch_sampler=train_sampler,
-                                persistent_workers=True,prefetch_factor=4)
+                                collate_fn=collate_fn, persistent_workers=True,prefetch_factor=4)
         self.dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
         
@@ -770,7 +765,7 @@ class Trainer(object):
         if self.accelerator.is_main_process:
             self.ema = EMA(self.model, beta = self.cfg['train']['ema_decay'], update_every = self.cfg['train']['ema_update_every'])
             self.ema.to(self.device)
-            self.eval_dl = DataLoader(ds, batch_size = 1, shuffle = False, pin_memory = True, num_workers = self.cfg['train']['num_workers'], collate_fn = collate_fn)
+            self.eval_dl = DataLoader(train_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = self.cfg['train']['num_workers'], collate_fn = collate_fn)
             self.eval_dl = iter(cycle(self.eval_dl))
         now = datetime.now()
         self.logs_folder = Path(self.cfg['train']['logs_folder']+'/'+now.strftime("%Y-%m-%d-%H-%M-%S"))
