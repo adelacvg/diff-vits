@@ -10,7 +10,6 @@ def cleaned_text_to_sequence(cleaned_text, tones, language):
     Returns:
       List of integers corresponding to the symbols in the text
   '''
-  print(cleaned_text)
   phones = [_symbol_to_id[symbol] for symbol in cleaned_text]
   tone_start = language_tone_start_map[language]
   tones = [i + tone_start for i in tones]
