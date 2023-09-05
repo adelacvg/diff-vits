@@ -2,6 +2,7 @@ import abc
 from datetime import datetime
 from matplotlib import pyplot as plt
 from unet1d.unet_1d_condition import UNet1DConditionModel
+from unet1d.embeddings import TextTimeEmbedding
 from vocos import Vocos
 import json
 import os
@@ -166,8 +167,6 @@ class ConvLayer(nn.Module):
         std = math.sqrt((4 * (1.0 - dropout)) / (kernel_size * c_in))
         nn.init.normal_(conv.weight, mean=0, std=std)
         nn.init.constant_(conv.bias, 0)
-        # self.conv = weight_norm(conv, dim=2)
-        # self.dropout = dropout
 
     def forward(self, x, encoder_padding_mask=None, **kwargs):
         layer_norm_training = kwargs.get('layer_norm_training', None)
@@ -177,9 +176,6 @@ class ConvLayer(nn.Module):
             x = x.masked_fill(encoder_padding_mask.t().unsqueeze(-1), 0)
         x = self.layer_norm(x)
         x = self.conv(x)
-        # x = F.relu(x)
-        # if self.dropout > 0:
-        #     x = F.dropout(x, p=self.dropout)
         return x
 
 class EncConvLayer(nn.Module):
@@ -755,10 +751,15 @@ class Trainer(object):
         self.train_num_steps = self.cfg['train']['train_num_steps']
 
         # dataset and dataloader
-        collate_fn = TextAudioCollate()
-        ds = NS2VCDataset(self.cfg, self.vocos)
-        self.ds = ds
-        dl = DataLoader(ds, batch_size = self.cfg['train']['train_batch_size'], shuffle = True, pin_memory = True, num_workers = self.cfg['train']['num_workers'], collate_fn = collate_fn)
+        train_dataset = TextAudioSpeakerLoader(self.cfg)
+        train_sampler = DistributedBucketSampler(
+            train_dataset,
+            self.cfg['train']['batch_size'],
+            [32, 300, 400, 500, 600, 700, 800, 900, 1000])
+        collate_fn = TextAudioSpeakerCollate()
+        dl = DataLoader(train_dataset, num_workers=24, shuffle=False, pin_memory=True,
+                                collate_fn=collate_fn, batch_sampler=train_sampler,
+                                persistent_workers=True,prefetch_factor=4)
         self.dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
         
@@ -785,9 +786,6 @@ class Trainer(object):
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
-            # 'opt': self.opt.state_dict(),
-            # 'ema': self.ema.state_dict(),
-            # 'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
         }
         torch.save(data, str(self.logs_folder / f'model-{milestone}.pt'))
 
@@ -796,9 +794,6 @@ class Trainer(object):
         device = accelerator.device
 
         data = torch.load(model_path, map_location=device)
-
-        # model = self.accelerator.unwrap_model(self.model)
-        # model.load_state_dict(data['model'])
 
         self.step = data['step']
 
@@ -835,9 +830,7 @@ class Trainer(object):
                     data = [d.to(device) for d in data]
 
                     with self.accelerator.autocast():
-                        loss, loss_diff, loss_f0, loss_dur, \
-                        lf0, lf0_pred, log_duration_prediction, log_duration_targets,\
-                        pred, target = self.model(data, self.vocos)
+                        loss, loss_diff, loss_dur, pred, target = self.model(data, self.vocos)
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
                     self.accelerator.backward(loss)
@@ -860,16 +853,14 @@ class Trainer(object):
                     logger.info('Train Epoch: {} [{:.0f}%]'.format(
                         self.step//len(self.ds),
                         100. * self.step / self.train_num_steps))
-                    logger.info(f"Losses: {[loss_diff, loss_f0, loss_dur]}, step: {self.step}")
+                    logger.info(f"Losses: {[loss_diff, loss_dur]}, step: {self.step}")
 
                     scalar_dict = {"loss/diff": loss_diff, "loss/all": total_loss,
-                                "loss/f0": loss_f0,"loss/dur":loss_dur,
+                                "loss/dur":loss_dur,
                                 "loss/grad": grad_norm}
                     image_dict = {
-                        "all/lf0": utils.plot_data_to_numpy(lf0[0, 0, :].cpu().numpy(),
-                                                            lf0_pred[0, 0, :].detach().cpu().numpy()),
-                        "all/dur": utils.plot_data_to_numpy(log_duration_targets[0, :].cpu().numpy(),
-                                                            log_duration_prediction[0, :].detach().cpu().numpy()),
+                        # "all/dur": utils.plot_data_to_numpy(log_duration_targets[0, :].cpu().numpy(),
+                        #                                     log_duration_prediction[0, :].detach().cpu().numpy()),
                         "all/spec": plot_spectrogram_to_numpy(target[0, :, :].detach().unsqueeze(-1).cpu()),
                         "all/spec_pred": plot_spectrogram_to_numpy(pred[0, :, :].detach().unsqueeze(-1).cpu()),
                     }
@@ -906,6 +897,7 @@ class Trainer(object):
                             })
                         image_dict = {
                             f"gen/mel":plot_spectrogram_to_numpy(mel[0, :, :].detach().unsqueeze(-1).cpu()),
+                            # f"gt/mel":plot_spectrogram_to_numpy(mel[0, :, :].detach().unsqueeze(-1).cpu()),
                         }
                         utils.summarize(
                             writer=writer_eval,
