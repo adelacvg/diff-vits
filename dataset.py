@@ -5,103 +5,102 @@ import numpy as np
 import torch
 import torch.utils.data
 import torchaudio
-from text import text_to_sequence
-import utils
 import torchaudio.transforms as T
+from text import cleaned_text_to_sequence, get_bert
+import commons
 
 
-class NS2VCDataset(torch.utils.data.Dataset):
+class TextAudioDataset(torch.utils.data.Dataset):
     """
         1) loads audio, speaker_id, text pairs
         2) normalizes text and converts them to sequences of integers
         3) computes spectrograms from audio files.
     """
 
-    def __init__(self, cfg, codec, all_in_mem: bool = False):
+    def __init__(self, cfg):
         self.audiopaths = glob(os.path.join(cfg['data']['training_files'], "**/*.wav"), recursive=True)
         self.sampling_rate = cfg['data']['sampling_rate']
         self.hop_length = cfg['data']['hop_length']
-        self.codec = codec
-
-        random.shuffle(self.audiopaths)
-        
-        self.all_in_mem = all_in_mem
-        self.cleaners = []
-        if cfg['data']['language'] == 'en':
-            self.cleaners = ["english_cleaners"]
-        else:
-            self.cleaners = []
-        if self.all_in_mem:
-            self.cache = [self.get_audio(p) for p in self.audiopaths]
-
+        self.add_blank = cfg['data']['add_blank']
+        self.min_text_len = cfg['data']['min_text_len']
+        self.max_text_len = cfg['data']['max_text_len']
     def get_audio(self, filename):
         audio, sampling_rate = torchaudio.load(filename)
-        audio = T.Resample(sampling_rate, self.sampling_rate)(audio)
-
-        phone_path = filename + ".phone.txt"
-        with open(phone_path, "r") as f:
-            text = f.readline()
-        phone = np.array(text_to_sequence(text, self.cleaners))
-        phone = torch.LongTensor(phone)
-
-        duration = np.load(filename + ".duration.npy")
-        duration = torch.LongTensor(duration)
-
-        spec = torch.load(filename.replace(".wav", ".spec.pt")).squeeze(0)
-
-        f0 = np.load(filename + ".f0.npy")
-        f0, uv = utils.interpolate_f0(f0)
-        f0 = torch.FloatTensor(f0)
-        uv = torch.FloatTensor(uv)
-
-        lmin = min(f0.size(-1), spec.size(-1), sum(duration))
-        assert abs(f0.size(-1) - spec.size(-1)) < 3, (spec.size(-1), f0.shape, filename)
-        assert abs(spec.size(-1) - sum(duration)) < 3, (spec.size(-1), sum(duration), filename)
-        assert abs(audio.shape[1]-lmin * self.hop_length) < 3 * self.hop_length
-        assert phone.shape[0] == duration.shape[0]
-        spec, f0, uv = spec[:, :lmin], f0[:lmin], uv[:lmin]
-        audio = audio[:, :lmin * self.hop_length]
-        if sum(duration) > lmin:
-            duration[-1] = lmin - sum(duration[:-1])
-        return f0.detach(), spec.detach(), audio.detach(), uv.detach(), phone.detach(), duration.detach()
-
-    def random_slice(self, f0, spec, audio, uv, phone, duration):
-        if phone.shape[0] < 3:
-            print("skip too short audio")
-            return None
-        if phone.shape[0] > 30:
-            start = random.randint(0, phone.shape[0]-30)
-            end = start + 30
-            start_frame = sum(duration[:start])
-            end_frame = sum(duration[:end])
-            phone, duration = phone[start:end], duration[start:end]
-            f0 = f0[start_frame:end_frame]
-            spec = spec[:, start_frame:end_frame]
-            uv = uv[start_frame:end_frame]
-            audio = audio[:, start_frame*self.hop_length:end_frame*self.hop_length]
-        len_phoneme = phone.shape[0]
-        l = random.randint((len_phoneme//3), (len_phoneme//3*2))
-        u = random.randint(0, len_phoneme-l)
-        v = u + l
-        s = sum(duration[:u])
-        e = sum(duration[:v])
-        refer = spec[:,s:e]
-        f0 = torch.cat([f0[:s], f0[e:]])
-        spec = torch.cat([spec[:,:s], spec[:,e:]], dim=1)
-        audio = torch.cat([audio[:,:s*self.hop_length], audio[:,e*self.hop_length:]], dim=1)
-        uv = torch.cat([uv[:s], uv[e:]])
-        phone = torch.cat([phone[:u], phone[v:]])
-        duration = torch.cat([duration[:u], duration[v:]])
-        assert refer.shape[1] != 0
-        assert audio.shape[1] != 0
-
-        return refer, f0, spec, audio, uv, phone, duration
-
-    def __getitem__(self, index):
-        if self.all_in_mem:
-            return self.random_slice(*self.cache[index])
+        if sampling_rate != self.sampling_rate:
+            raise ValueError("{} {} SR doesn't match target {} SR".format(
+                sampling_rate, self.sampling_rate))
+        audio_norm = audio
+        spec_filename = filename.replace(".wav", ".spec.pt")
+        mel_filename = filename.replace(".wav", ".mel.pt")
+        if os.path.exists(spec_filename):
+            spec = torch.load(spec_filename)
         else:
-            return self.random_slice(*self.get_audio(self.audiopaths[index]))
+            if self.use_mel_spec_posterior:
+                # if os.path.exists(filename.replace(".wav", ".spec.pt")):
+                #     # spec, n_fft, num_mels, sampling_rate, fmin, fmax
+                #     spec = spec_to_mel_torch(
+                #         torch.load(filename.replace(".wav", ".spec.pt")), 
+                #         self.filter_length, self.n_mel_channels, self.sampling_rate,
+                #         self.hparams.mel_fmin, self.hparams.mel_fmax)
+                spec = mel_spectrogram_torch(audio_norm, self.filter_length,
+                    self.n_mel_channels, self.sampling_rate, self.hop_length,
+                    self.win_length, self.hparams.mel_fmin, self.hparams.mel_fmax, center=False)
+            else:
+                spec = spectrogram_torch(audio_norm, self.filter_length,
+                    self.sampling_rate, self.hop_length, self.win_length,
+                    center=False)
+            spec = torch.squeeze(spec, 0)
+            torch.save(spec, spec_filename)
+        return spec, audio_norm
+
+    def get_text(self, text, word2ph, phone, tone, language_str, wav_path):
+        # print(text, word2ph,phone, tone, language_str)
+        pold = phone
+        w2pho = [i for i in word2ph]
+        word2ph = [i for i in word2ph]
+        phone, tone, language = cleaned_text_to_sequence(phone, tone, language_str)
+        pold2 = phone
+
+        if self.add_blank:
+            p1 = len(phone)
+            phone = commons.intersperse(phone, 0)
+            p2 = len(phone)
+            t1 = len(tone)
+            tone = commons.intersperse(tone, 0)
+            t2 = len(tone)
+            language = commons.intersperse(language, 0)
+            for i in range(len(word2ph)):
+                word2ph[i] = word2ph[i] * 2
+            word2ph[0] += 1
+        bert_path = wav_path.replace(".wav", ".bert.pt")
+        try:
+            bert = torch.load(bert_path)
+            assert bert.shape[-1] == len(phone)
+        except:
+            bert = get_bert(text, word2ph, language_str)
+            torch.save(bert, bert_path)
+            #print(bert.shape[-1], bert_path, text, pold)
+            assert bert.shape[-1] == len(phone)
+
+        assert bert.shape[-1] == len(phone), (
+        bert.shape, len(phone), sum(word2ph), p1, p2, t1, t2, pold, pold2, word2ph, text, w2pho)
+        phone = torch.LongTensor(phone)
+        tone = torch.LongTensor(tone)
+        language = torch.LongTensor(language)
+        return bert, phone, tone, language
+    def get_audio_text_pair(self, audiopath, split='|'):
+        text_path = audiopath.replace('.wav','.text')
+        with open(text_path, encoding='utf-8') as f:
+            texts = f.readline().strip().split(split)
+        # separate filename, speaker_id and text
+        language, text, phones, tone, word2ph = texts
+
+        bert, phones, tone, language = self.get_text(text, word2ph, phones, tone, language, audiopath)
+
+        spec, wav = self.get_audio(audiopath)
+        return (phones, spec, wav, tone, language, bert)
+    def __getitem__(self, index):
+        return self.get_audio_text_pair(self.audiopaths[index])
 
     def __len__(self):
         return len(self.audiopaths)
