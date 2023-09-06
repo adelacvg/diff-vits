@@ -30,8 +30,15 @@
   },
   "phoneme_encoder":{
     "hidden_channels":512,
+    "out_channels":512,
     "n_layers":6,
     "p_dropout":0.1
+  },
+  "spec_encoder":{
+    "in_channels":513,
+    "hidden_channels":256,
+    "out_channels":1,
+    "kernel_size":3
   },
   "duration_predictor":{
     "in_channels":512,
