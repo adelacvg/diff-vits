@@ -9,6 +9,7 @@ import torchaudio
 import torchaudio.transforms as T
 from text import cleaned_text_to_sequence, get_bert
 import commons
+from torch.utils.data import Dataset, DataLoader
 
 
 class TextAudioDataset(torch.utils.data.Dataset):
@@ -34,8 +35,8 @@ class TextAudioDataset(torch.utils.data.Dataset):
         audio_norm = audio
         spec_filename = filename.replace(".wav", ".spec.pt")
         mel_filename = filename.replace(".wav", ".mel.pt")
-        spec = torch.load(spec_filename)
-        mel = torch.load(mel_filename)
+        spec = torch.load(spec_filename).squeeze(0)
+        mel = torch.load(mel_filename).squeeze(0)
         return spec, mel, audio_norm
 
     def get_text(self, text, word2ph, phone, tone, language_str, wav_path):
@@ -73,7 +74,7 @@ class TextAudioDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.audiopaths)
 
-class TextAudioSpeakerCollate():
+class TextAudioCollate():
     """ Zero-pads model inputs and targets
     """
 
@@ -139,7 +140,10 @@ class TextAudioSpeakerCollate():
             language = row[5]
             language_padded[i, :language.size(0)] = language
 
-        return text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, tone_padded, language_padded
+        return text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, mel_padded, tone_padded, language_padded
 cfg = json.load(open('./config.json'))
 train_dataset = TextAudioDataset(cfg)
-phones, spec, mel, wav, tone, language = train_dataset[0]
+collate_fn = TextAudioCollate()
+dl = DataLoader(train_dataset, num_workers=0, shuffle=False, pin_memory=True,
+                collate_fn=collate_fn)
+text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, mel_padded, tone_padded, language_padded = next(iter(dl))
