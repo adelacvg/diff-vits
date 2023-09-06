@@ -15,7 +15,7 @@ import numpy as np
 from scipy.io.wavfile import read
 import torch
 from torch.nn import functional as F
-from modules.commons import sequence_mask
+from commons import sequence_mask
 
 MATPLOTLIB_FLAG = False
 

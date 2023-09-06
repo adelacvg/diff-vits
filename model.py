@@ -15,7 +15,7 @@ from operations import OPERATIONS_ENCODER, MultiheadAttention, SinusoidalPositio
 from parametrizations import weight_norm
 from torch import nn
 import torchaudio
-from dataset import NS2VCDataset, TextAudioCollate, TextAudioDataset
+from dataset import TextAudioCollate, TextAudioDataset
 import commons
 import modules
 from accelerate import Accelerator
@@ -252,6 +252,42 @@ def pad(input_ele, mel_max_length=None):
         out_list.append(one_batch_padded)
     out_padded = torch.stack(out_list)
     return out_padded
+
+class Ph_p_encoder(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 hidden_channels,
+                 kernel_size,
+                 n_heads=8):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+
+        self.pre = nn.Conv1d(in_channels, hidden_channels, 1)
+        self.enc = UNet1DConditionModel(
+            in_channels=in_channels+hidden_channels,
+            out_channels=out_channels,
+            block_out_channels=(64,128,256,256),
+            norm_num_groups=8,
+            cross_attention_dim=hidden_channels,
+            attention_head_dim=n_heads,
+            addition_embed_type='text',
+            resnet_time_scale_shift='scale_shift',
+        )
+        self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
+
+    def forward(self, x, x_lengths, refer, refer_lengths):
+        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
+        refer_mask =  torch.unsqueeze(commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(x.dtype)
+        x = self.pre(x) * x_mask
+        x = self.enc(x, 0, refer, encoder_attention_mask=refer_mask)
+        stats = self.proj(x) * x_mask
+        m, logs = torch.split(stats, self.out_channels, dim=1)
+        z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
+        return z, m, logs, x_mask
 class SpecEncoder(nn.Module):
     def __init__(self,
                  in_channels,
@@ -363,20 +399,17 @@ class Pre_model(nn.Module):
         print("dp params:", count_parameters(self.prompt_encoder))
         self.phoneme_flow = ResidualCouplingLayer(**self.cfg['phoneme_flow'])
         print("phoneme flow params:", count_parameters(self.phoneme_flow))
-        self.ph_q_proj = nn.Conv1d(in_channels=self.cfg['phoneme_encoder']['hidden_size'], 
-                                      out_channels=self.cfg['phoneme_encoder']['hidden_size']*2,
+        self.ph_q_proj = nn.Conv1d(in_channels=self.cfg['phoneme_encoder']['hidden_channels'], 
+                                      out_channels=self.cfg['phoneme_encoder']['hidden_channels']*2,
                                       kernel_size=1)
-        self.ph_enc_p = Phoneme_postier(**self.cfg['phoneme_postier'])
+        self.ph_enc_p = Ph_p_encoder(**self.cfg['ph_p_encoder'])
+        self.attn_pooling = TextTimeEmbedding(513,512,8)
         
     def forward(self,data):
         text_padded, text_lengths, spec_padded,\
         spec_lengths, wav_padded, wav_lengths,\
         mel_padded, tone_padded, language_padded = data
-        z_q_ph, _ = group_hidden_by_segs(h_mels, mel2ph, nword)
-        z_q_ph = self.phoneme_proj(z_q_ph)
-        ph_p, m_ph_p, logs_ph_p, ph_p_mask = self.ph_enc_p(text)
-        ph_q, m_ph_q, logs_ph_q, ph_q_mask = self.ph_encoder(z_q_ph, text_lengths)
-        g = self.attn_pooling(refer)
+        g = self.attn_pooling(spec_padded)
         x, m_p, logs_p, x_mask = self.phoneme_encoder(text_padded, text_lengths, tone_padded, language_padded)
         z, m_q, logs_q, y_mask = self.spec_encoder(spec_padded, spec_lengths, g)
         z_p = self.flow(z, y_mask, g=g)
@@ -402,6 +435,10 @@ class Pre_model(nn.Module):
         # expand prior
         m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
         logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+
+        z_q_ph, _ = group_hidden_by_segs(h_mels, mel2ph, nword)
+        z_q_ph = self.phoneme_proj(z_q_ph)
+        ph_p, m_ph_p, logs_ph_p, ph_p_mask = self.ph_enc_p(text_padded, text_lengths)
 
         segment_size = rand
         refer, ids_slice = commons.rand_slice_segments(spec_padded, spec_lengths, segment_size)
@@ -576,8 +613,7 @@ class NaturalSpeech2(nn.Module):
         timesteps, = betas.shape
         self.num_timesteps = timesteps
 
-        self.sampling_timesteps = cfg['train']['sampling_timesteps']
-        self.is_ddim_sampling = self.sampling_timesteps < timesteps
+        self.sampling_timesteps = None
         self.ddim_sampling_eta = ddim_sampling_eta
         register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
 

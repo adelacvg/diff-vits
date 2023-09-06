@@ -34,11 +34,33 @@
     "n_layers":6,
     "p_dropout":0.1
   },
+  "ph_p_encoder":{
+    "in_channels":513,
+    "hidden_channels":256,
+    "out_channels":1,
+    "kernel_size":3
+  },
   "spec_encoder":{
     "in_channels":513,
     "hidden_channels":256,
     "out_channels":1,
     "kernel_size":3
+  },
+  "spec_flow": {
+    "channels":256, 
+    "hidden_channels":256, 
+    "kernel_size":5, 
+    "dilation_rate":1,
+    "n_layers":4,
+    "gin_channels":256
+  },
+  "phoneme_flow": {
+    "channels":256, 
+    "hidden_channels":256, 
+    "kernel_size":5, 
+    "dilation_rate":1,
+    "n_layers":4,
+    "gin_channels":256
   },
   "duration_predictor":{
     "in_channels":512,
