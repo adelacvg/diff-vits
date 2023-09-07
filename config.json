@@ -1,6 +1,6 @@
 {
   "train": {
-    "train_batch_size":8,
+    "train_batch_size":1,
     "gradient_accumulate_every": 1,
     "train_lr": 0.0001,
     "train_num_steps": 1000000,
@@ -10,11 +10,14 @@
     "logs_folder" : "logs/tts",
     "seed": 1234,
     "epochs": 10000,
+    "use_noise_scaled_mas": true,
+    "mas_noise_scale_initial":0.01,
+    "noise_scale_delta":2e-6,
     "betas": [
       0.8,
       0.99
     ],
-    "num_workers": 32,
+    "num_workers": 0,
     "eps": 1e-09,
     "keep_ckpts": 3
   },
@@ -23,33 +26,34 @@
     "val_files": "./dataset_processed",
     "sampling_rate": 24000,
     "hop_length": 256,
+    "window_size":1024,
     "language" : "zh",
     "add_blank" : true,
     "min_text_len": 1,
     "max_text_len": 300
   },
   "phoneme_encoder":{
-    "hidden_channels":512,
-    "out_channels":512,
+    "hidden_channels":256,
+    "out_channels":256,
     "n_layers":6,
     "p_dropout":0.1
   },
   "ph_p_encoder":{
-    "in_channels":513,
+    "in_channels":256,
     "hidden_channels":256,
-    "out_channels":1,
+    "out_channels":256,
     "kernel_size":3
   },
   "spec_encoder":{
-    "in_channels":513,
+    "in_channels":256,
     "hidden_channels":256,
-    "out_channels":1,
+    "out_channels":256,
     "kernel_size":3
   },
   "spec_flow": {
-    "channels":256, 
-    "hidden_channels":256, 
-    "kernel_size":5, 
+    "channels":256,
+    "hidden_channels":256,
+    "kernel_size":5,
     "dilation_rate":1,
     "n_layers":4,
     "gin_channels":256
@@ -63,8 +67,8 @@
     "gin_channels":256
   },
   "duration_predictor":{
-    "in_channels":512,
-    "hidden_channels":512,
+    "in_channels":256,
+    "hidden_channels":256,
     "out_channels":1,
     "attention_layers":10,
     "n_heads":8,
@@ -72,17 +76,15 @@
   },
   "prompt_encoder":{
     "in_channels":100,
-    "hidden_channels":512,
+    "hidden_channels":256,
+    "out_channels":256,
     "n_layers":6,
     "p_dropout": 0.2
   },
   "diffusion_encoder":{
     "in_channels":100,
     "out_channels":100,
-    "hidden_channels":512,
-    "kernel_size":5,
-    "dilation_rate":1,
-    "n_layers":40,
+    "hidden_channels":256,
     "n_heads":8,
     "p_dropout":0.2
   }
