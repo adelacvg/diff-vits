@@ -476,8 +476,10 @@ class Pre_model(nn.Module):
         m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
         logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
 
-        z_q_ph, _ = group_hidden_by_segs(z.transpose(1,2), w, spec_lengths).tranpose(1,2)
-        z_q_ph = self.phoneme_proj(z_q_ph)
+        seg_ids = torch.arange(text_padded.shape[1]).expand(text_padded.shape[0], -1).to(text_padded.device)
+        seg_ids = torch.stack([torch.repeat_interleave(x,w_x.squeeze(0)) for x in seg_ids for w_x in torch.LongTensor(w)])
+        z_q_ph, cnt_q_ph = group_hidden_by_segs(z.transpose(1,2), seg_ids, text_lengths)
+        z_q_ph = self.phoneme_proj(z_q_ph.transpose(1,2))
         ph_p, m_ph_p, logs_ph_p, ph_p_mask = self.ph_enc_p(text_padded, text_lengths)
 
         segment_size = rand
