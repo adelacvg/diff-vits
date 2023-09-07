@@ -92,7 +92,8 @@ class TextEncoder(nn.Module):
         super().__init__()
         self.arch = [8 for _ in range(n_layers)]
         self.num_layers = n_layers
-        self.hidden_size = hidden_channels
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
         self.padding_idx = 0
         self.emb = nn.Embedding(len(symbols), hidden_channels)
         nn.init.normal_(self.emb.weight, 0.0, hidden_channels ** -0.5)
@@ -105,7 +106,7 @@ class TextEncoder(nn.Module):
         self.max_source_positions = 2000
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerEncoderLayer(self.arch[i], self.hidden_size, self.dropout)
+            TransformerEncoderLayer(self.arch[i], self.hidden_channels, self.dropout)
             for i in range(self.num_layers)
         ])
         self.proj = nn.Conv1d(hidden_channels, out_channels*2, 1)
@@ -126,10 +127,11 @@ class TextEncoder(nn.Module):
             x = layer(x, encoder_padding_mask=x_mask)
 
         assert torch.isnan(x).any() == False
-        x = rearrange('t b c->b c t', x)
+        x = rearrange(x, 't b c->b c t')
         stats = self.proj(x) * (~x_mask)
         m, logs = torch.split(stats, self.out_channels, dim=1)
-        return x, m, logs, ~x_mask
+        x_mask = torch.unsqueeze(commons.sequence_mask(text_lengths, x.size(2)), 1).to(x.dtype)
+        return x, m, logs, x_mask
 class ConvTBC(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding=0):
         super(ConvTBC, self).__init__()
@@ -194,6 +196,7 @@ class PromptEncoder(nn.Module):
     def __init__(self,
       in_channels=128,
       hidden_channels=512,
+      out_channels=128,
       n_layers=6,
       p_dropout=0.2,
       last_ln = True,):
@@ -214,6 +217,7 @@ class PromptEncoder(nn.Module):
         if last_ln:
             self.layer_norm = LayerNorm(hidden_channels)
         self.pre = ConvLayer(in_channels, hidden_channels, 1, p_dropout)
+        self.out_proj = ConvLayer(hidden_channels, out_channels, 1)
 
     def forward(self, src_tokens, lengths=None):
         # B x C x T -> T x B x C
@@ -252,7 +256,39 @@ def pad(input_ele, mel_max_length=None):
         out_list.append(one_batch_padded)
     out_padded = torch.stack(out_list)
     return out_padded
+class ResidualCouplingBlock(nn.Module):
+    def __init__(self,
+                 channels,
+                 hidden_channels,
+                 kernel_size,
+                 dilation_rate,
+                 n_layers,
+                 n_flows=4,
+                 gin_channels=0):
+        super().__init__()
+        self.channels = channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.n_flows = n_flows
+        self.gin_channels = gin_channels
 
+        self.flows = nn.ModuleList()
+        for i in range(n_flows):
+            self.flows.append(
+                modules.ResidualCouplingLayer(channels, hidden_channels, kernel_size, dilation_rate, n_layers,
+                                              gin_channels=gin_channels, mean_only=True))
+            self.flows.append(modules.Flip())
+
+    def forward(self, x, x_mask, g=None, reverse=False):
+        if not reverse:
+            for flow in self.flows:
+                x, _ = flow(x, x_mask, g=g, reverse=reverse)
+        else:
+            for flow in reversed(self.flows):
+                x = flow(x, x_mask, g=g, reverse=reverse)
+        return x
 class Ph_p_encoder(nn.Module):
     def __init__(self,
                  in_channels,
@@ -268,9 +304,9 @@ class Ph_p_encoder(nn.Module):
 
         self.pre = nn.Conv1d(in_channels, hidden_channels, 1)
         self.enc = UNet1DConditionModel(
-            in_channels=in_channels+hidden_channels,
+            in_channels=in_channels,
             out_channels=out_channels,
-            block_out_channels=(64,128,256,256),
+            block_out_channels=(hidden_channels//4,hidden_channels//2,hidden_channels,hidden_channels),
             norm_num_groups=8,
             cross_attention_dim=hidden_channels,
             attention_head_dim=n_heads,
@@ -303,9 +339,9 @@ class SpecEncoder(nn.Module):
 
         self.pre = nn.Conv1d(in_channels, hidden_channels, 1)
         self.enc = UNet1DConditionModel(
-            in_channels=in_channels+hidden_channels,
+            in_channels=in_channels,
             out_channels=out_channels,
-            block_out_channels=(64,128,256,256),
+            block_out_channels=(hidden_channels//4,hidden_channels//2,hidden_channels,hidden_channels),
             norm_num_groups=8,
             cross_attention_dim=hidden_channels,
             attention_head_dim=n_heads,
@@ -314,11 +350,10 @@ class SpecEncoder(nn.Module):
         )
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths, refer, refer_lengths):
+    def forward(self, x, x_lengths):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
-        refer_mask =  torch.unsqueeze(commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(x.dtype)
         x = self.pre(x) * x_mask
-        x = self.enc(x, 0, refer, encoder_attention_mask=refer_mask)
+        x = self.enc(x, 0, x.transpose(1,2), encoder_attention_mask=x_mask).sample
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
         z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
@@ -338,39 +373,35 @@ class DurationPredictor(nn.Module):
         self.act = nn.ModuleList()
         self.n_heads = n_heads
         self.p_dropout = p_dropout
-        self.pre = ConvLayer(in_channels, hidden_channels, kernel_size=3, dropout=p_dropout)
+        self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=1)
         self.enc = UNet1DConditionModel(
-            in_channels=in_channels+hidden_channels,
+            in_channels=in_channels,
             out_channels=out_channels,
-            block_out_channels=(64,128,hidden_channels,hidden_channels),
+            block_out_channels=(hidden_channels//4,hidden_channels//2,hidden_channels,hidden_channels),
             norm_num_groups=8,
             cross_attention_dim=hidden_channels,
             attention_head_dim=n_heads,
             addition_embed_type='text',
             resnet_time_scale_shift='scale_shift',
         )
-        self.proj = ConvLayer(hidden_channels, out_channels, kernel_size=3, dropout=p_dropout)
     # MultiHeadAttention 
     def forward(self, x, x_lengths, prompt, prompt_lengths):
         assert torch.isnan(x).any() == False
         x = x.detach()
         prompt = prompt.detach()
-        x_mask = ~commons.sequence_mask(x_lengths, x.size(0)).to(torch.bool)
-        prompt_mask = ~commons.sequence_mask(prompt_lengths, prompt.size(0)).to(torch.bool)
-        x = self.pre(x, x_mask)
-        x = x.masked_fill(x_mask.t().unsqueeze(-1), 0)
-        prompt = prompt.masked_fill(prompt_mask.t().unsqueeze(-1), 0)
+        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
+        prompt_mask = torch.unsqueeze(commons.sequence_mask(prompt_lengths, prompt.size(2)), 1).to(x.dtype)
+        # prompt_mask = ~commons.sequence_mask(prompt_lengths, prompt.size(2)).to(torch.bool)
+        x = self.pre(x)*x_mask
+        prompt = prompt*prompt_mask
+        # prompt = prompt.masked_fill(prompt_mask.t().unsqueeze(-1), 0)
         assert torch.isnan(x).any() == False
-        x = self.enc(x,0,prompt,encoder_attention_mask=prompt_mask)
+        x = self.enc(x,0,prompt.transpose(1,2),encoder_attention_mask=prompt_mask).sample
         assert torch.isnan(x).any() == False
-        x = x.masked_fill(x_mask.t().unsqueeze(-1), 0)
-        x = self.proj(x, x_mask)
-        x = x.masked_fill(x_mask.t().unsqueeze(-1), 0)
-        x = rearrange(x, 't b c -> b c t')
-        return x.squeeze(1)
+        x = x*x_mask
+        return x
 def group_hidden_by_segs(h, seg_ids, max_len):
     """
-
     :param h: [B, T, H]
     :param seg_ids: [B, T]
     :return: h_ph: [B, T_ph, H]
@@ -393,26 +424,35 @@ class Pre_model(nn.Module):
         print("prompt params:", count_parameters(self.prompt_encoder))
         self.spec_encoder = SpecEncoder(**self.cfg['spec_encoder'])
         print("spec params:", count_parameters(self.prompt_encoder))
-        self.spec_flow = ResidualCouplingLayer(**self.cfg['spec_flow'])
+        self.spec_flow = ResidualCouplingBlock(**self.cfg['spec_flow'])
         print("spec flow params:", count_parameters(self.prompt_encoder))
         self.dp = DurationPredictor(**self.cfg['duration_predictor'])
         print("dp params:", count_parameters(self.prompt_encoder))
-        self.phoneme_flow = ResidualCouplingLayer(**self.cfg['phoneme_flow'])
+        self.phoneme_flow = ResidualCouplingBlock(**self.cfg['phoneme_flow'])
         print("phoneme flow params:", count_parameters(self.phoneme_flow))
         self.ph_q_proj = nn.Conv1d(in_channels=self.cfg['phoneme_encoder']['hidden_channels'], 
                                       out_channels=self.cfg['phoneme_encoder']['hidden_channels']*2,
                                       kernel_size=1)
         self.ph_enc_p = Ph_p_encoder(**self.cfg['ph_p_encoder'])
-        self.attn_pooling = TextTimeEmbedding(513,512,8)
+        print("ph p encoder params:", count_parameters(self.ph_enc_p))
+        self.attn_pooling = TextTimeEmbedding(self.cfg['spec_encoder']['in_channels'],
+                                              self.cfg['spec_flow']['gin_channels'],8)
+        self.spec_proj = nn.Conv1d(self.cfg['data']['window_size']//2+1,
+                                   self.cfg['spec_encoder']['in_channels'],1)
+        self.use_noise_scaled_mas = self.cfg['train']['use_noise_scaled_mas']
+        self.mas_noise_scale_initial = self.cfg['train']['mas_noise_scale_initial']
+        self.noise_scale_delta = self.cfg['train']['noise_scale_delta']
+        self.current_mas_noise_scale = self.mas_noise_scale_initial
         
     def forward(self,data):
         text_padded, text_lengths, spec_padded,\
         spec_lengths, wav_padded, wav_lengths,\
         mel_padded, tone_padded, language_padded = data
-        g = self.attn_pooling(spec_padded)
+        spec_padded = self.spec_proj(spec_padded)
+        g = self.attn_pooling(spec_padded.transpose(1,2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.phoneme_encoder(text_padded, text_lengths, tone_padded, language_padded)
-        z, m_q, logs_q, y_mask = self.spec_encoder(spec_padded, spec_lengths, g)
-        z_p = self.flow(z, y_mask, g=g)
+        z, m_q, logs_q, y_mask = self.spec_encoder(spec_padded, spec_lengths)
+        z_p = self.spec_flow(z, y_mask, g=g)
         with torch.no_grad():
             # negative cross-entropy
             s_p_sq_r = torch.exp(-2 * logs_p)  # [b, d, t]
@@ -429,14 +469,14 @@ class Pre_model(nn.Module):
             attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
         w = attn.sum(2)
         logw_ = torch.log(w + 1e-6) * x_mask
-        logw = self.dp(x, x_mask, g=g)
+        logw = self.dp(x, text_lengths, spec_padded, spec_lengths)
         l_length_dp = torch.sum((logw - logw_) ** 2, [1, 2]) / torch.sum(x_mask)  # for averaging
 
         # expand prior
         m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
         logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
 
-        z_q_ph, _ = group_hidden_by_segs(h_mels, mel2ph, nword)
+        z_q_ph, _ = group_hidden_by_segs(z.transpose(1,2), w, spec_lengths).tranpose(1,2)
         z_q_ph = self.phoneme_proj(z_q_ph)
         ph_p, m_ph_p, logs_ph_p, ph_p_mask = self.ph_enc_p(text_padded, text_lengths)
 
@@ -545,11 +585,10 @@ class Diffusion_Encoder(nn.Module):
     )
   def forward(self, x, data, t):
     assert torch.isnan(x).any() == False
-    contentvec, prompt, contentvec_lengths, prompt_lengths = data
-    _, b, _ = x.shape
+    cond, prompt, cond_lengths, prompt_lengths = data
     prompt = rearrange(prompt, 't b c -> b t c')
-    contentvec = rearrange(contentvec, 't b c -> b c t')
-    x = torch.cat([x, contentvec], dim=1)
+    cond = rearrange(cond, 't b c -> b c t')
+    x = torch.cat([x, cond], dim=1)
 
     # x_mask = commons.sequence_mask(contentvec_lengths, x.size(2)).to(torch.bool)
     prompt_mask = commons.sequence_mask(prompt_lengths, prompt.size(1)).to(torch.bool)
