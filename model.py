@@ -1,4 +1,5 @@
 import abc
+import random
 from datetime import datetime
 from matplotlib import pyplot as plt
 import monotonic_align
@@ -128,9 +129,9 @@ class TextEncoder(nn.Module):
 
         assert torch.isnan(x).any() == False
         x = rearrange(x, 't b c->b c t')
-        stats = self.proj(x) * (~x_mask)
-        m, logs = torch.split(stats, self.out_channels, dim=1)
         x_mask = torch.unsqueeze(commons.sequence_mask(text_lengths, x.size(2)), 1).to(x.dtype)
+        stats = self.proj(x) * x_mask
+        m, logs = torch.split(stats, self.out_channels, dim=1)
         return x, m, logs, x_mask
 class ConvTBC(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding=0):
@@ -319,7 +320,7 @@ class Ph_p_encoder(nn.Module):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
         refer_mask =  torch.unsqueeze(commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(x.dtype)
         x = self.pre(x) * x_mask
-        x = self.enc(x, 0, refer, encoder_attention_mask=refer_mask)
+        x = self.enc(x, 0, refer.transpose(1,2), encoder_attention_mask=refer_mask).sample
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
         z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
@@ -414,6 +415,17 @@ def group_hidden_by_segs(h, seg_ids, max_len):
     cnt_gby_segs = cnt_gby_segs[:, 1:]
     h_gby_segs = h_gby_segs / torch.clamp(cnt_gby_segs[:, :, None], min=1)
     return h_gby_segs, cnt_gby_segs
+def generate_index(w):
+    B,_, T = w.shape
+    lens = w.sum(dim=2,keepdim=True).squeeze(1)
+    max_len = torch.max(lens).item()
+
+    index_tensor = torch.zeros((B,int(max_len)), dtype=torch.long).to(w.device)
+    for b in range(B):
+        index = torch.range(1,T)
+        index_tensor[b,:int(lens[b][0])] = index.repeat_interleave(w[b,0].long())
+
+    return index_tensor
 class Pre_model(nn.Module):
     def __init__(self, cfg) -> None:
         super().__init__()
@@ -439,6 +451,8 @@ class Pre_model(nn.Module):
                                               self.cfg['spec_flow']['gin_channels'],8)
         self.spec_proj = nn.Conv1d(self.cfg['data']['window_size']//2+1,
                                    self.cfg['spec_encoder']['in_channels'],1)
+        self.phoneme_proj = nn.Conv1d(self.cfg['spec_encoder']['out_channels'],
+                                      self.cfg['phoneme_flow']['channels'],1)
         self.use_noise_scaled_mas = self.cfg['train']['use_noise_scaled_mas']
         self.mas_noise_scale_initial = self.cfg['train']['mas_noise_scale_initial']
         self.noise_scale_delta = self.cfg['train']['noise_scale_delta']
@@ -476,14 +490,16 @@ class Pre_model(nn.Module):
         m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
         logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
 
-        seg_ids = torch.arange(text_padded.shape[1]).expand(text_padded.shape[0], -1).to(text_padded.device)
-        seg_ids = torch.stack([torch.repeat_interleave(x,w_x.squeeze(0)) for x in seg_ids for w_x in torch.LongTensor(w)])
-        z_q_ph, cnt_q_ph = group_hidden_by_segs(z.transpose(1,2), seg_ids, text_lengths)
+        seg_ids = generate_index(w)
+        z_q_ph, cnt_q_ph = group_hidden_by_segs(z.transpose(1,2), seg_ids, torch.max(text_lengths))
         z_q_ph = self.phoneme_proj(z_q_ph.transpose(1,2))
-        ph_p, m_ph_p, logs_ph_p, ph_p_mask = self.ph_enc_p(text_padded, text_lengths)
+        z_p_ph = self.phoneme_flow(z_q_ph, x_mask,g=g)
+        ph_p, m_ph_p, logs_ph_p, ph_p_mask = self.ph_enc_p(x, text_lengths, spec_padded, spec_lengths)
 
-        segment_size = rand
-        refer, ids_slice = commons.rand_slice_segments(spec_padded, spec_lengths, segment_size)
+        l = [random.randint(int(sl//3), int(sl//3*2)) for sl in spec_lengths]
+        u = [random.randint(0, sl-l) for sl in spec_lengths]
+        v = u + l
+        refer, ids_slice = rand_slice_prompt(spec_padded, l, u, v)
         prompt = self.prompt_encoder(normalize(refer_padded),refer_lengths)
         return prompt, l_length_dp, attn, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (x, logw, logw_)
     def infer(self, data, length_scale=1.0, noise_scale=.667):
@@ -886,7 +902,7 @@ class Trainer(object):
         # dataset and dataloader
         train_dataset = TextAudioDataset(self.cfg)
         collate_fn = TextAudioCollate()
-        dl = DataLoader(train_dataset, num_workers=self.cfg['train']['num_workers'], shuffle=False, pin_memory=True, collate_fn=collate_fn)
+        dl = DataLoader(train_dataset,batch_size=self.cfg['train']['train_batch_size'], num_workers=self.cfg['train']['num_workers'], shuffle=False, pin_memory=True, collate_fn=collate_fn)
         self.dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
         
