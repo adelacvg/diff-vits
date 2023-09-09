@@ -66,6 +66,12 @@
     "n_layers":4,
     "gin_channels":256
   },
+  "ph_encoder":{
+    "in_channels":256,
+    "hidden_channels":256,
+    "out_channels":256,
+    "kernel_size":3 
+  },
   "duration_predictor":{
     "in_channels":256,
     "hidden_channels":256,
@@ -75,7 +81,7 @@
     "p_dropout":0.5
   },
   "prompt_encoder":{
-    "in_channels":100,
+    "in_channels":256,
     "hidden_channels":256,
     "out_channels":256,
     "n_layers":6,
