@@ -217,7 +217,7 @@ class PromptEncoder(nn.Module):
         ])
         self.last_ln = last_ln
         if last_ln:
-            self.layer_norm = LayerNorm(hidden_channels)
+            self.layer_norm = LayerNorm(out_channels)
         self.pre = ConvLayer(in_channels, hidden_channels, 1, p_dropout)
         self.out_proj = ConvLayer(hidden_channels, out_channels, 1)
 
@@ -234,6 +234,7 @@ class PromptEncoder(nn.Module):
         for layer in self.layers:
             x = layer(x, encoder_padding_mask=encoder_padding_mask)
 
+        x = self.out_proj(x) * (1 - encoder_padding_mask.float()).transpose(0, 1)[..., None]
         if self.last_ln:
             x = self.layer_norm(x)
             x = x * (1 - encoder_padding_mask.float()).transpose(0, 1)[..., None]
@@ -378,7 +379,7 @@ class Ph_Encoder(nn.Module):
     def forward(self, x, x_lengths):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
         x = self.pre(x) * x_mask
-        x = self.enc(x, 0, x.transpose(1,2), encoder_attention_mask=x_mask).sample
+        # x = self.enc(x, 0, x.transpose(1,2), encoder_attention_mask=x_mask).sample
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
         z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
@@ -446,7 +447,7 @@ def generate_index(w):
 
     index_tensor = torch.zeros((B,int(max_len)), dtype=torch.long).to(w.device)
     for b in range(B):
-        index = torch.range(1,T).to(w.device)
+        index = torch.arange(1,T+1).to(w.device)
         index_tensor[b,:int(lens[b][0])] = index.repeat_interleave(w[b,0].long())
 
     return index_tensor
@@ -474,9 +475,6 @@ class Pre_model(nn.Module):
         print("dp params:", count_parameters(self.prompt_encoder))
         self.phoneme_flow = ResidualCouplingBlock(**self.cfg['phoneme_flow'])
         print("phoneme flow params:", count_parameters(self.phoneme_flow))
-        self.ph_q_proj = nn.Conv1d(in_channels=self.cfg['phoneme_encoder']['hidden_channels'], 
-                                      out_channels=self.cfg['phoneme_encoder']['hidden_channels']*2,
-                                      kernel_size=1)
         self.ph_enc_p = Ph_p_encoder(**self.cfg['ph_p_encoder'])
         print("ph p encoder params:", count_parameters(self.ph_enc_p))
         self.attn_pooling = TextTimeEmbedding(self.cfg['spec_encoder']['in_channels'],
@@ -535,7 +533,7 @@ class Pre_model(nn.Module):
         prompt = self.prompt_encoder(normalize(prompt),prompt_lengths)
 
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
-        loss_kl_ph = kl_loss(z_p_ph, logs_q_ph, logs_p_ph, x_mask)
+        loss_kl_ph = kl_loss(z_p_ph, logs_q_ph, m_p_ph,logs_p_ph, x_mask)
         l_length = torch.sum(l_length_dp.float())
         return z, spec_lengths, prompt, prompt_lengths, (l_length, loss_kl, loss_kl_ph)
         # return prompt, prompt_lengths, l_length_dp, attn, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (x, logw, logw_)
@@ -543,9 +541,10 @@ class Pre_model(nn.Module):
 
         x, x_lengths, spec_padded,\
         spec_lengths, tone, language = data
-        g = self.attn_pooling(spec_padded)
+        spec_padded = self.spec_proj(spec_padded)
+        g = self.attn_pooling(spec_padded.transpose(1,2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.phoneme_encoder(x, x_lengths, tone, language)
-        logw = self.dp(x, x_mask, g=g)
+        logw = self.dp(x, x_lengths, spec_padded, spec_lengths)
         w = torch.exp(logw) * x_mask * length_scale
         w_ceil = torch.ceil(w)
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
@@ -589,7 +588,7 @@ class Diffusion_Encoder(nn.Module):
     self.unet = UNet1DConditionModel(
         in_channels=in_channels+hidden_channels,
         out_channels=out_channels,
-        block_out_channels=(256,384,512,512),
+        block_out_channels=(128,192,256,256),
         norm_num_groups=8,
         cross_attention_dim=hidden_channels,
         attention_head_dim=n_heads,
@@ -600,7 +599,6 @@ class Diffusion_Encoder(nn.Module):
     assert torch.isnan(x).any() == False
     cond, prompt, cond_lengths, prompt_lengths = data
     prompt = rearrange(prompt, 't b c -> b t c')
-    cond = rearrange(cond, 't b c -> b c t')
     x = torch.cat([x, cond], dim=1)
 
     # x_mask = commons.sequence_mask(contentvec_lengths, x.size(2)).to(torch.bool)
@@ -790,25 +788,98 @@ class NaturalSpeech2(nn.Module):
 
         ret = img
         return ret
+    def sample_fun(self, x, t, data = None):
+        model_output = self.diff_model(x,data, t)
+        t = t.type(torch.int64) 
+        x_start = model_output
+        pred_noise = self.predict_noise_from_start(x, t, x_start)
 
+        return x_start
     @torch.no_grad()
-    def sample(self, text, refer, text_lengths, refer_lengths, vocos, sampling_timesteps = 200, sample_method = 'ddim'):
+    def sample(self, text, spec, text_lengths, spec_lengths, tone, language, vocos, sampling_timesteps = 200, sample_method = 'unipc'):
         self.sampling_timesteps = sampling_timesteps
         if sample_method == 'ddpm':
             sample_fn = self.p_sample_loop
         elif sample_method == 'ddim':
             sample_fn = self.ddim_sample
-        audio = sample_fn(text, refer, text_lengths, refer_lengths)
+        elif sample_method == 'dpmsolver':
+            from sampler.dpm_solver import NoiseScheduleVP, model_wrapper, DPM_Solver
+            noise_schedule = NoiseScheduleVP(schedule='discrete', betas=self.betas)
+            def my_wrapper(fn):
+                def wrapped(x, t, **kwargs):
+                    ret = fn(x, t, **kwargs)
+                    self.bar.update(1)
+                    return ret
+
+                return wrapped
+
+            data = (text, spec, text_lengths, spec_lengths, tone, language)
+            content, refer = self.pre_model.infer(data)
+            shape = (content.shape[1], self.dim, content.shape[0])
+            batch, device, total_timesteps, sampling_timesteps, eta = shape[0], refer.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
+            audio = torch.randn(shape, device = device)
+            model_fn = model_wrapper(
+                my_wrapper(self.sample_fun),
+                noise_schedule,
+                model_type="x_start",  #"noise" or "x_start" or "v" or "score"
+                model_kwargs={"data":(content,refer,text_lengths,spec_lengths)}
+            )
+            dpm_solver = DPM_Solver(model_fn, noise_schedule, algorithm_type="dpmsolver++")
+
+            steps = 40
+            self.bar = tqdm(desc="sample time step", total=steps)
+            audio = dpm_solver.sample(
+                audio,
+                steps=steps,
+                order=2,
+                skip_type="time_uniform",
+                method="multistep",
+            )
+            self.bar.close()
+        elif sample_method =='unipc':
+            from sampler.uni_pc import NoiseScheduleVP, model_wrapper, UniPC
+            noise_schedule = NoiseScheduleVP(schedule='discrete', betas=self.betas)
+
+            def my_wrapper(fn):
+                def wrapped(x, t, **kwargs):
+                    ret = fn(x, t, **kwargs)
+                    self.bar.update(1)
+                    return ret
+
+                return wrapped
+
+            data = (text, text_lengths, spec, spec_lengths, tone, language)
+            content, refer = self.pre_model.infer(data)
+            shape = (content.shape[1], self.dim, content.shape[0])
+            batch, device, total_timesteps, sampling_timesteps, eta = shape[0], refer.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
+            audio = torch.randn(shape, device = device)
+            model_fn = model_wrapper(
+                my_wrapper(self.sample_fun),
+                noise_schedule,
+                model_type="x_start",  #"noise" or "x_start" or "v" or "score"
+                model_kwargs={"data":(content,refer,text_lengths,spec_lengths)}
+            )
+            uni_pc = UniPC(model_fn, noise_schedule, variant='bh2')
+            steps = 30
+            self.bar = tqdm(desc="sample time step", total=steps)
+            audio = uni_pc.sample(
+                audio,
+                steps=steps,
+                order=2,
+                skip_type="time_uniform",
+                method="multistep",
+            )
+            self.bar.close()
 
         audio = denormalize(audio)
         mel = audio
-        # print(audio.shape)
-        audio = vocos.decode(audio.cpu())
+        vocos.to(audio.device)
+        audio = vocos.decode(audio)
 
         if audio.ndim == 3:
             audio = rearrange(audio, 'b 1 n -> b n')
 
-        return audio, mel 
+        return audio,mel 
 
     def q_sample(self, x_start, t, noise = None):
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -824,7 +895,7 @@ class NaturalSpeech2(nn.Module):
         mel_padded, tone_padded, language_padded = data
         b, d, n, device = *spec_padded.shape, spec_padded.device
         x_mask = torch.unsqueeze(commons.sequence_mask(spec_lengths, spec_padded.size(2)), 1).to(spec_padded.dtype)
-        x_start = normalize(spec_padded)*x_mask
+        x_start = normalize(mel_padded)*x_mask
         # get pre model outputs
         content, lengths, refer, refer_lengths, losses = self.pre_model(data)
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
@@ -861,7 +932,7 @@ def save_audio(audio, path, codec):
     torchaudio.save(path, audio, 24000)
 def get_grad_norm(model):
     total_norm = 0
-    for p in model.parameters():
+    for name,p in model.named_parameters():
         param_norm = p.grad.data.norm(2)
         total_norm += param_norm.item() ** 2
     total_norm = total_norm ** (1. / 2) 
@@ -896,6 +967,7 @@ class Trainer(object):
         # dataset and dataloader
         train_dataset = TextAudioDataset(self.cfg)
         collate_fn = TextAudioCollate()
+        self.ds = train_dataset
         dl = DataLoader(train_dataset,batch_size=self.cfg['train']['train_batch_size'], num_workers=self.cfg['train']['num_workers'], shuffle=False, pin_memory=True, collate_fn=collate_fn)
         self.dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
