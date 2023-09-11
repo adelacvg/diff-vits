@@ -16,7 +16,7 @@ in_dir = ""
 #     for line in tqdm.tqdm(open(transcription_path, encoding='utf-8').readlines()):
 
 def process_one(filename,language):
-    text_path = filename.replace('.wav','.text')
+    text_path = filename.replace('.wav','.txt')
     out_text_path = text_path.replace(in_dir,in_dir.rstrip('/')+"_processed")
     if not os.path.exists(os.path.dirname(out_text_path)):
         os.makedirs(os.path.dirname(out_text_path))

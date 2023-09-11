@@ -1,11 +1,11 @@
 {
   "train": {
-    "train_batch_size":2,
+    "train_batch_size":8,
     "gradient_accumulate_every": 1,
     "train_lr": 0.0001,
     "train_num_steps": 1000000,
     "adam_betas": [0.9, 0.99],
-    "save_and_sample_every":10,
+    "save_and_sample_every":1000,
     "timesteps":1000,
     "logs_folder" : "logs/tts",
     "seed": 1234,
@@ -17,13 +17,13 @@
       0.8,
       0.99
     ],
-    "num_workers": 0,
+    "num_workers": 32,
     "eps": 1e-09,
     "keep_ckpts": 3
   },
   "data": {
-    "training_files": "./dataset_processed",
-    "val_files": "./dataset_processed",
+    "training_files": "../AISHELL3_mas_processed",
+    "val_files": "../AISHELL3_mas_processed",
     "sampling_rate": 24000,
     "hop_length": 256,
     "window_size":1024,

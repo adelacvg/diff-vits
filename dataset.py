@@ -55,7 +55,7 @@ class TextAudioDataset(torch.utils.data.Dataset):
         language = torch.LongTensor(language)
         return phone, tone, language
     def get_audio_text_pair(self, audiopath, split='|'):
-        text_path = audiopath.replace('.wav','.text')
+        text_path = audiopath.replace('.wav','.txt')
         with open(text_path, encoding='utf-8') as f:
             texts = f.readline().strip().split(split)
         # separate filename, speaker_id and text

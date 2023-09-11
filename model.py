@@ -1023,14 +1023,14 @@ class Trainer(object):
 
         saved_state_dict = data['model']
         model = self.accelerator.unwrap_model(self.model)
-        new_state_dict= {}
-        for k,v in saved_state_dict.items():
-            name=k[7:]
-            new_state_dict[name] = v
-        if hasattr(model, 'module'):
-            model.module.load_state_dict(new_state_dict)
-        else:
-            model.load_state_dict(new_state_dict)
+        # new_state_dict= {}
+        # for k,v in saved_state_dict.items():
+        #     name=k[7:]
+        #     new_state_dict[name] = v
+        # if hasattr(model, 'module'):
+        #     model.module.load_state_dict(new_state_dict)
+        # else:
+        model.load_state_dict(saved_state_dict)
 
 
     def train(self):
@@ -1119,7 +1119,7 @@ class Trainer(object):
                             })
                         image_dict = {
                             f"gen/mel":plot_spectrogram_to_numpy(mel[0, :, :].detach().unsqueeze(-1).cpu()),
-                            f"gt/mel":plot_spectrogram_to_numpy(mel[0, :, :].detach().unsqueeze(-1).cpu()),
+                            f"gt/mel":plot_spectrogram_to_numpy(mel_padded[0, :, :].detach().unsqueeze(-1).cpu()),
                         }
                         utils.summarize(
                             writer=writer_eval,
