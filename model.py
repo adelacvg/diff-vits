@@ -514,16 +514,22 @@ class Pre_model(nn.Module):
         logw_ = torch.log(w + 1e-6) * x_mask
         logw = self.dp(x, text_lengths, spec_padded, spec_lengths)
         l_length_dp = torch.sum((logw - logw_) ** 2, [1, 2]) / torch.sum(x_mask)  # for averaging
-
-        # expand prior
-        m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
-        logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
-
+        
+        #phoneme flow vae
         seg_ids = generate_index(w)
         z_q_ph, cnt_q_ph = group_hidden_by_segs(z.transpose(1,2), seg_ids, torch.max(text_lengths))
         z_q_ph, m_q_ph, logs_q_ph, _ = self.ph_encoder_q(z_q_ph.transpose(1,2), text_lengths)
         z_p_ph = self.phoneme_flow(z_q_ph, x_mask,g=g)
         ph_p, m_p_ph, logs_p_ph, _ = self.ph_enc_p(x, text_lengths, spec_padded, spec_lengths)
+
+        prosody = torch.zeros_like(z)
+        for b in range(z.shape[0]):
+            prosody[b,:,:spec_lengths[b]] = z_q_ph[b].repeat_interleave(w[b,0].long(), dim=1)
+        z = z + prosody
+
+        # expand prior
+        m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
+        logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
 
         l = [random.randint(int(sl//3), int(sl//3*2)) for sl in spec_lengths]
         u = [random.randint(0, spec_lengths[i]-l[i]) for i in range(spec_lengths.shape[0])]
@@ -536,7 +542,6 @@ class Pre_model(nn.Module):
         loss_kl_ph = kl_loss(z_p_ph, logs_q_ph, m_p_ph,logs_p_ph, x_mask)
         l_length = torch.sum(l_length_dp.float())
         return z, spec_lengths, prompt, prompt_lengths, (l_length, loss_kl, loss_kl_ph)
-        # return prompt, prompt_lengths, l_length_dp, attn, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (x, logw, logw_)
     def infer(self, data, length_scale=1.0, noise_scale=.667):
 
         x, x_lengths, spec_padded,\
@@ -544,6 +549,12 @@ class Pre_model(nn.Module):
         spec_padded = self.spec_proj(spec_padded)
         g = self.attn_pooling(spec_padded.transpose(1,2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.phoneme_encoder(x, x_lengths, tone, language)
+
+        ph_p, m_p_ph, logs_p_ph, _ = self.ph_enc_p(x, x_lengths, spec_padded, spec_lengths)
+        ph_p = m_p + torch.randn_like(m_p_ph) * torch.exp(logs_p_ph) * noise_scale
+        z_q_ph = self.phoneme_flow(ph_p, x_mask,g=g, reverse=True)
+
+        #length regulator
         logw = self.dp(x, x_lengths, spec_padded, spec_lengths)
         w = torch.exp(logw) * x_mask * length_scale
         w_ceil = torch.ceil(w)
@@ -556,9 +567,15 @@ class Pre_model(nn.Module):
         logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        z = self.flow(z_p, y_mask, g=g, reverse=True)
+        z = self.spec_flow(z_p, y_mask, g=g, reverse=True)
+
+        prosody = torch.zeros_like(z)
+        for b in range(z.shape[0]):
+            prosody[b,:,:sum(w_ceil[b,0]).long()] = z_q_ph[b].repeat_interleave(w_ceil[b,0].long(), dim=1)
+        z = z + prosody
+
         prompt = self.prompt_encoder(normalize(spec_padded),spec_lengths)
-        return prompt, attn, y_mask, (z, z_p, m_p, logs_p)
+        return z, prompt
 
 def Conv1d(*args, **kwargs):
   layer = nn.Conv1d(*args, **kwargs)
@@ -850,7 +867,7 @@ class NaturalSpeech2(nn.Module):
 
             data = (text, text_lengths, spec, spec_lengths, tone, language)
             content, refer = self.pre_model.infer(data)
-            shape = (content.shape[1], self.dim, content.shape[0])
+            shape = (content.shape[0], self.dim, content.shape[2])
             batch, device, total_timesteps, sampling_timesteps, eta = shape[0], refer.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
             audio = torch.randn(shape, device = device)
             model_fn = model_wrapper(
