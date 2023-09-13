@@ -17,20 +17,25 @@
       0.8,
       0.99
     ],
-    "num_workers": 32,
+    "num_workers": 0,
     "eps": 1e-09,
     "keep_ckpts": 3
   },
   "data": {
-    "training_files": "../AISHELL3_mas_processed",
-    "val_files": "../AISHELL3_mas_processed",
+    "training_files": "dataset_processed",
+    "val_files": "dataset_processed",
     "sampling_rate": 24000,
     "hop_length": 256,
     "window_size":1024,
     "language" : "zh",
     "add_blank" : true,
     "min_text_len": 1,
-    "max_text_len": 300
+    "max_text_len": 300,
+    "win_length": 2048,
+    "n_mel_channels": 128,
+    "mel_fmin": 0.0,
+    "mel_fmax": null,
+    "cleaned_text": true
   },
   "phoneme_encoder":{
     "hidden_channels":256,
@@ -48,7 +53,10 @@
     "in_channels":256,
     "hidden_channels":256,
     "out_channels":256,
-    "kernel_size":3
+    "kernel_size":5,
+    "dilation_rate":1,
+    "n_layers":16,
+    "gin_channels":256
   },
   "spec_flow": {
     "channels":256,
@@ -74,11 +82,10 @@
   },
   "duration_predictor":{
     "in_channels":256,
-    "hidden_channels":256,
-    "out_channels":1,
-    "attention_layers":10,
-    "n_heads":8,
-    "p_dropout":0.5
+    "filter_channels":256,
+    "kernel_size":3,
+    "p_dropout":0.5,
+    "gin_channels":256
   },
   "prompt_encoder":{
     "in_channels":256,
@@ -93,5 +100,27 @@
     "hidden_channels":256,
     "n_heads":8,
     "p_dropout":0.2
+  },
+  "vits":{
+    "use_spk_conditioned_encoder": true,
+    "use_noise_scaled_mas": true,
+    "use_mel_posterior_encoder": false,
+    "use_duration_discriminator": true,
+    "inter_channels": 192,
+    "hidden_channels": 192,
+    "filter_channels": 768,
+    "n_heads": 2,
+    "n_layers": 6,
+    "kernel_size": 3,
+    "p_dropout": 0.1,
+    "resblock": "1",
+    "resblock_kernel_sizes": [
+      3,
+      7,
+      11
+    ],
+    "n_layers_q": 3,
+    "use_spectral_norm": false,
+    "gin_channels": 256
   }
 }
