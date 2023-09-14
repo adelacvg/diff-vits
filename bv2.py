@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 import commons
 from dataset import TextAudioCollate, TextAudioDataset
+from losses import kl_loss
 from model import count_parameters
 import modules
 import attentions
@@ -30,6 +31,7 @@ from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
 
 from commons import init_weights, get_padding
 from text import symbols, num_tones, num_languages
+from unet1d.embeddings import TextTimeEmbedding
 from unet1d.unet_1d_condition import UNet1DConditionModel
 from utils import plot_spectrogram_to_numpy
 import utils
@@ -873,16 +875,13 @@ class VITS(nn.Module):
             hidden_channels, 256, 3, 0.5, gin_channels=gin_channels
         )
 
-        if n_speakers > 1:
-            self.emb_g = nn.Embedding(n_speakers, gin_channels)
-        else:
-            self.ref_enc = ReferenceEncoder(spec_channels, gin_channels)
-
-    def forward(self, x, x_lengths, y, y_lengths, sid, tone, language):
-        if self.n_speakers > 0:
-            g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
-        else:
-            g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
+        # if n_speaers > 1:
+        #     self.emb_g = nn.Embedding(n_speakers, gin_channels)
+        # else:
+        #     self.ref_enc = ReferenceEncoder(spec_channels, gin_channels)
+        self.ref_enc = TextTimeEmbedding(spec_channels, gin_channels,8)
+    def forward(self, x, x_lengths, y, y_lengths, tone, language):
+        g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, g=g
         )
@@ -941,17 +940,19 @@ class VITS(nn.Module):
         #     z, y_lengths, self.segment_size
         # )
         # o = self.dec(z_slice, g=g)
-        return content, lengths, refer, refer_lengths, (l_length, loss_kl, loss_kl_ph)
-        return (
-            o,
-            l_length,
-            attn,
-            ids_slice,
-            x_mask,
-            y_mask,
-            (z, z_p, m_p, logs_p, m_q, logs_q),
-            (x, logw, logw_),
-        )
+        loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
+        loss_kl_ph=0
+        return z, y_lengths, z, y_lengths, (l_length, loss_kl, loss_kl_ph)
+        # return (
+        #     o,
+        #     l_length,
+        #     attn,
+        #     ids_slice,
+        #     x_mask,
+        #     y_mask,
+        #     (z, z_p, m_p, logs_p, m_q, logs_q),
+        #     (x, logw, logw_),
+        # )
 
     def infer(
         self,
