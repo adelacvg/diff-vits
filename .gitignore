@@ -9,3 +9,5 @@ logs/*
 vctk/*
 dataset_processed/*
 dataset/*
+*.wav
+*.pth

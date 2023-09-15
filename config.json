@@ -97,7 +97,7 @@
   "diffusion_encoder":{
     "in_channels":100,
     "out_channels":100,
-    "hidden_channels":256,
+    "hidden_channels":192,
     "n_heads":8,
     "p_dropout":0.2
   },
