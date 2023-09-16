@@ -839,7 +839,7 @@ class Diffusion_Encoder(nn.Module):
     self.unet = UNet1DConditionModel(
         in_channels=in_channels+hidden_channels,
         out_channels=out_channels,
-        block_out_channels=(hidden_channels//2,hidden_channels//4*3,hidden_channels,hidden_channels),
+        block_out_channels=(128,256,384,512),
         norm_num_groups=8,
         cross_attention_dim=hidden_channels,
         attention_head_dim=n_heads,
