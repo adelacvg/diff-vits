@@ -21,6 +21,7 @@ signal = AudioSignal(wave[0,10000000:10100000], 44100)#15018932
 
 # Encode audio signal as one long file
 # (may run out of GPU memory on long files)
+# x = model.compress(signal)
 x = model.preprocess(signal.audio_data, signal.sample_rate)
 z, codes, latents, _, _ = model.encode(x)
 
