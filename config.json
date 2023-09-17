@@ -1,6 +1,6 @@
 {
   "train": {
-    "train_batch_size":2,
+    "train_batch_size":8,
     "gradient_accumulate_every": 1,
     "train_lr": 0.0001,
     "train_num_steps": 1000000,
@@ -17,18 +17,18 @@
       0.8,
       0.99
     ],
-    "num_workers": 0,
+    "num_workers": 4,
     "eps": 1e-09,
     "keep_ckpts": 3
   },
   "data": {
-    "training_files": "dataset_processed",
+    "training_files": "../AISHELL3_mas_processed",
     "val_files": "dataset_processed",
     "sampling_rate": 24000,
     "hop_length": 256,
     "window_size":1024,
     "language" : "zh",
-    "add_blank" : true,
+    "add_blank" : false,
     "min_text_len": 1,
     "max_text_len": 300,
     "win_length": 2048,

@@ -276,7 +276,7 @@ class DurationPredictor(nn.Module):
         self.enc = UNet1DConditionModel(
             in_channels=in_channels,
             out_channels=out_channels,
-            block_out_channels=(hidden_channels//4,hidden_channels//2,hidden_channels,hidden_channels),
+            block_out_channels=(hidden_channels//4,hidden_channels//4,hidden_channels//2,hidden_channels//2),
             norm_num_groups=8,
             cross_attention_dim=hidden_channels,
             attention_head_dim=n_heads,
@@ -565,35 +565,33 @@ class Ph_p_encoder(nn.Module):
                  in_channels,
                  hidden_channels,
                  out_channels,
-                 spec_channels,
                  kernel_size,
-                 n_heads=8):
+                 n_layers,
+                 n_heads=8,
+                 p_dropout=0.2):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.hidden_channels = hidden_channels
         self.kernel_size = kernel_size
-
+        self.arch = [8 for _ in range(n_layers)]
+        self.num_layers = n_layers
+        self.layers = nn.ModuleList([])
+        self.layers.extend([
+            TransformerEncoderLayer(self.arch[i], self.hidden_channels, p_dropout)
+            for i in range(self.num_layers)
+        ])
         self.pre = nn.Conv1d(in_channels, hidden_channels, 1)
-        self.enc = UNet1DConditionModel(
-            in_channels=in_channels,
-            out_channels=hidden_channels,
-            block_out_channels=(hidden_channels//4,hidden_channels//2,hidden_channels,hidden_channels),
-            norm_num_groups=8,
-            cross_attention_dim=hidden_channels,
-            attention_head_dim=n_heads,
-            addition_embed_type='text',
-            resnet_time_scale_shift='scale_shift',
-        )
-        self.prompt_proj = nn.Conv1d(spec_channels, hidden_channels, 1)
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths, refer, refer_lengths):
+    def forward(self, x, x_lengths):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
-        refer_mask =  torch.unsqueeze(commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(x.dtype)
-        refer = self.prompt_proj(refer)*refer_mask
         x = self.pre(x) * x_mask
-        x = self.enc(x, 0, refer.transpose(1,2), encoder_attention_mask=refer_mask).sample
+        x = rearrange(x, 'b c t->t b c')
+        x_mask1 = ~commons.sequence_mask(x_lengths, x.size(0)).to(torch.bool)
+        for layer in self.layers:
+            x = layer(x, encoder_padding_mask=x_mask1)
+        x = rearrange(x, 't b c -> b c t')
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
         z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
@@ -612,10 +610,10 @@ class VITS(nn.Module):
         p_dropout,
         gin_channels=256,
         use_sdp=True,
-        n_flow_layer=4,
+        n_flow_layer=3,
         n_layers_trans_flow=6,
         flow_share_parameter=False,
-        use_transformer_flow=True,
+        use_transformer_flow=False,
         **kwargs
     ):
         super().__init__()
@@ -651,6 +649,7 @@ class VITS(nn.Module):
             p_dropout,
             gin_channels=self.enc_gin_channels,
         )
+        print('text encoder params: ', count_parameters(self.enc_p))
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -660,6 +659,7 @@ class VITS(nn.Module):
             16,
             gin_channels=gin_channels,
         )
+        print('linear spec encoder params: ', count_parameters(self.enc_q))
         if use_transformer_flow:
             self.flow = TransformerCouplingBlock(
                 inter_channels,
@@ -682,16 +682,22 @@ class VITS(nn.Module):
                 n_flow_layer,
                 gin_channels=gin_channels,
             )
+        print('spec flow params: ', count_parameters(self.flow))
         # self.sdp = StochasticDurationPredictor(
         #     hidden_channels, 192, 3, 0.5, 4, gin_channels=gin_channels
         # )
         self.dp = DurationPredictor(
             hidden_channels, 256,spec_channels, 3, 0.5
         )
+        print('dp params: ', count_parameters(self.dp))
         self.ref_enc = TextTimeEmbedding(spec_channels, gin_channels,1)
+        print('refenc params: ', count_parameters(self.ref_enc))
         self.ph_encoder_q = Ph_Encoder(inter_channels,inter_channels,inter_channels,3)
-        self.phoneme_flow = ResidualCouplingBlock(inter_channels, hidden_channels, 5, 1, 6, gin_channels=gin_channels)
-        self.ph_enc_p = Ph_p_encoder(hidden_channels,hidden_channels,inter_channels,spec_channels,3)
+        print('ph enc q params: ', count_parameters(self.ph_encoder_q))
+        self.phoneme_flow = ResidualCouplingBlock(inter_channels, hidden_channels, 5, 1, n_flow_layer, gin_channels=gin_channels)
+        print('ph flow params: ', count_parameters(self.phoneme_flow))
+        self.ph_enc_p = Ph_p_encoder(hidden_channels,hidden_channels,inter_channels,3,4)
+        print('ph_enc p params: ', count_parameters(self.ph_enc_p))
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
         g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
@@ -699,6 +705,7 @@ class VITS(nn.Module):
         )
         z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
         z_p = self.flow(z, y_mask, g=g)
+        # z_p = z
 
         with torch.no_grad():
             # negative cross-entropy
@@ -752,7 +759,7 @@ class VITS(nn.Module):
         z_q_ph, cnt_q_ph = group_hidden_by_segs(z.transpose(1,2), seg_ids, torch.max(x_lengths))
         z_q_ph, m_q_ph, logs_q_ph, _ = self.ph_encoder_q(z_q_ph.transpose(1,2), x_lengths)
         z_p_ph = self.phoneme_flow(z_q_ph, x_mask,g=g)
-        ph_p, m_p_ph, logs_p_ph, _ = self.ph_enc_p(x, x_lengths, y, y_lengths)
+        ph_p, m_p_ph, logs_p_ph, _ = self.ph_enc_p(x, x_lengths)
 
         prosody = torch.zeros_like(z)
         for b in range(z.shape[0]):
@@ -779,9 +786,10 @@ class VITS(nn.Module):
     ):
         g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
-            x, x_lengths, tone, language, g=g
+            x, x_lengths, tone, language
         )
-        ph_p, m_p_ph, logs_p_ph, _ = self.ph_enc_p(x, x_lengths, y, y_lengths)
+
+        ph_p, m_p_ph, logs_p_ph, _ = self.ph_enc_p(x, x_lengths)
         ph_p = m_p + torch.randn_like(m_p_ph) * torch.exp(logs_p_ph) * noise_scale
         z_q_ph = self.phoneme_flow(ph_p, x_mask,g=g, reverse=True)
 
@@ -804,6 +812,7 @@ class VITS(nn.Module):
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
         z = self.flow(z_p, y_mask, g=g, reverse=True)*y_mask
+        # z = z_p
 
         prosody = torch.zeros_like(z)
         for b in range(z.shape[0]):
@@ -839,15 +848,18 @@ class Diffusion_Encoder(nn.Module):
     self.unet = UNet1DConditionModel(
         in_channels=in_channels+hidden_channels,
         out_channels=out_channels,
-        block_out_channels=(128,256,384,512),
+        block_out_channels=(128,192,256,256),
         norm_num_groups=8,
         cross_attention_dim=hidden_channels,
         attention_head_dim=n_heads,
         addition_embed_type='text',
         resnet_time_scale_shift='scale_shift',
     )
+    print('unet params: ', count_parameters(self.unet))
     self.spec_channels = 513
     self.prompt_encoder = PromptEncoder(self.spec_channels, hidden_channels, hidden_channels,4,0.2)
+    print('prompt enc params: ', count_parameters(self.prompt_encoder))
+
   def forward(self, x, data, t):
     assert torch.isnan(x).any() == False
     cond, prompt, cond_lengths, prompt_lengths = data
@@ -1197,6 +1209,8 @@ class NaturalSpeech2(nn.Module):
         # get pre model outputs
         content, lengths, losses = self.vits(text_padded, text_lengths, spec_padded, spec_lengths, tone_padded, language_padded)
         content, lengths, refer, refer_lengths, x_start = rand_slice(content, spec_padded, lengths, mel_padded)
+        # refer, refer_lengths = spec_padded, lengths
+        # x_start = mel_padded
 
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
         x_mask = torch.unsqueeze(commons.sequence_mask(lengths, content.size(2)), 1).to(spec_padded.dtype)
@@ -1346,7 +1360,10 @@ class Trainer(object):
                         total_loss += loss.item()
                     self.accelerator.backward(loss)
                 grad_norm = get_grad_norm(self.model)
-                accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+                if self.step < 100000:
+                    accelerator.clip_grad_norm_(self.model.parameters(), 10.0)
+                else:
+                    accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
                 pbar.set_description(f'loss: {total_loss:.4f}')
 
                 accelerator.wait_for_everyone()

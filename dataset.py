@@ -141,9 +141,9 @@ class TextAudioCollate():
             language_padded[i, :language.size(0)] = language
 
         return text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, mel_padded, tone_padded, language_padded
-cfg = json.load(open('./config.json'))
-train_dataset = TextAudioDataset(cfg)
-collate_fn = TextAudioCollate()
-dl = DataLoader(train_dataset, num_workers=0, shuffle=False, pin_memory=True,
-                collate_fn=collate_fn)
-text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, mel_padded, tone_padded, language_padded = next(iter(dl))
+# cfg = json.load(open('./config.json'))
+# train_dataset = TextAudioDataset(cfg)
+# collate_fn = TextAudioCollate()
+# dl = DataLoader(train_dataset, num_workers=0, shuffle=False, pin_memory=True,
+#                 collate_fn=collate_fn)
+# text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, mel_padded, tone_padded, language_padded = next(iter(dl))
