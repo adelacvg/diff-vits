@@ -762,11 +762,15 @@ class VITS(nn.Module):
         ph_p, m_p_ph, logs_p_ph, _ = self.ph_enc_p(x, x_lengths)
 
         prosody = torch.zeros_like(z)
+        global step
         for b in range(z.shape[0]):
             prosody[b,:,:y_lengths[b]] = z_q_ph[b].repeat_interleave(w[b,0].long(), dim=1)
-        z = z + prosody
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
         loss_kl_ph = kl_loss(z_p_ph, logs_q_ph, m_p_ph,logs_p_ph, x_mask)
+        if step<200000:
+            loss_kl_ph*=0
+            prosody*=0
+        z = z + prosody
         # loss_kl_ph = 0
         return z, y_lengths,(l_length, loss_kl, loss_kl_ph)
 
@@ -817,6 +821,9 @@ class VITS(nn.Module):
         prosody = torch.zeros_like(z)
         for b in range(z.shape[0]):
             prosody[b,:,:sum(w_ceil[b,0]).long()] = z_q_ph[b].repeat_interleave(w_ceil[b,0].long(), dim=1)
+        global step
+        if step<200000:
+            prosody*=0
         z = z + prosody
         return z, y
 
@@ -848,7 +855,7 @@ class Diffusion_Encoder(nn.Module):
     self.unet = UNet1DConditionModel(
         in_channels=in_channels+hidden_channels,
         out_channels=out_channels,
-        block_out_channels=(128,192,256,256),
+        block_out_channels=(128,256,384,512),
         norm_num_groups=8,
         cross_attention_dim=hidden_channels,
         attention_head_dim=n_heads,
@@ -1228,7 +1235,7 @@ class NaturalSpeech2(nn.Module):
         loss_diff = loss_diff.mean()
 
         l_length, loss_kl, loss_kl_ph = losses
-        loss = 45*loss_diff + l_length + loss_kl + loss_kl_ph
+        loss = loss_diff + l_length + loss_kl + loss_kl_ph
 
         # cross entropy loss to codebooks
         # _, indices, _, quantized_list = encode(codes_padded,8,codec)

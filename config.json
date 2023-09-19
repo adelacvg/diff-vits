@@ -56,7 +56,7 @@
     "n_layers": 6,
     "kernel_size": 3,
     "p_dropout": 0.1,
-    "n_layers_q": 3,
+    "n_layers_q": 4,
     "use_spectral_norm": false,
     "gin_channels": 256
   }
