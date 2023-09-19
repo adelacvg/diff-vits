@@ -792,7 +792,8 @@ class VITS(nn.Module):
         self,
         x,
         x_lengths,
-        sid,
+        y,
+        y_lenths,
         tone,
         language,
         noise_scale=0.667,
@@ -800,7 +801,6 @@ class VITS(nn.Module):
         noise_scale_w=0.8,
         max_len=None,
         sdp_ratio=0,
-        y=None,
     ):
         # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, tone, language, bert)
         # g = self.gst(y)
