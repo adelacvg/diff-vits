@@ -707,9 +707,9 @@ class VITS(nn.Module):
                 1,
                 n_flow_layer,
             )
-        # self.sdp = StochasticDurationPredictor(
-        #     hidden_channels, 192, 3, 0.5, 4
-        # )
+        self.sdp = StochasticDurationPredictor(
+            hidden_channels, 192, 3, 0.5, 4
+        )
         self.dp = DurationPredictor(
             hidden_channels, 256, 3, 0.5
         )
@@ -754,8 +754,8 @@ class VITS(nn.Module):
 
         w = attn.sum(2)
 
-        # l_length_sdp = self.sdp(x, x_mask, w)
-        # l_length_sdp = l_length_sdp / torch.sum(x_mask)
+        l_length_sdp = self.sdp(x, x_mask, w)
+        l_length_sdp = l_length_sdp / torch.sum(x_mask)
 
         logw_ = torch.log(w + 1e-6) * x_mask
         logw = self.dp(x, x_mask)
@@ -763,8 +763,7 @@ class VITS(nn.Module):
             x_mask
         )  # for averaging
 
-        # l_length = l_length_dp + l_length_sdp
-        l_length = l_length_dp
+        l_length = l_length_dp + l_length_sdp
 
         # expand prior
         m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
@@ -808,10 +807,9 @@ class VITS(nn.Module):
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language
         )
-        # logw = self.sdp(x, x_mask, reverse=True, noise_scale=noise_scale_w) * (
-        #     sdp_ratio
-        # ) + self.dp(x, x_mask) * (1 - sdp_ratio)
-        logw = self.dp(x, x_mask)
+        logw = self.sdp(x, x_mask, reverse=True, noise_scale=noise_scale_w) * (
+            sdp_ratio
+        ) + self.dp(x, x_mask) * (1 - sdp_ratio)
         w = torch.exp(logw) * x_mask * length_scale
         w_ceil = torch.ceil(w)
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
