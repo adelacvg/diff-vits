@@ -346,6 +346,51 @@ class DurationPredictor(nn.Module):
         x = self.proj(x * x_mask)
         return x * x_mask
 
+class DurationPredictor_unet(nn.Module):
+    def __init__(self,
+        in_channels,
+        hidden_channels,
+        prompt_channels,
+        kernel_size,
+        p_dropout,
+        out_channels=1,
+        n_heads=8):
+        super().__init__()
+        self.conv_blocks = nn.ModuleList()
+        self.attn_blocks = nn.ModuleList()
+        self.norm = nn.ModuleList()
+        self.act = nn.ModuleList()
+        self.n_heads = n_heads
+        self.p_dropout = p_dropout
+        self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=1)
+        self.enc = UNet1DConditionModel(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            block_out_channels=(hidden_channels//4,hidden_channels//4,hidden_channels//2,hidden_channels//2),
+            norm_num_groups=8,
+            cross_attention_dim=hidden_channels,
+            attention_head_dim=n_heads,
+            addition_embed_type='text',
+            resnet_time_scale_shift='scale_shift',
+        )
+        self.prompt_proj = nn.Conv1d(prompt_channels, hidden_channels,1)
+    # MultiHeadAttention 
+    def forward(self, x, x_lengths, prompt, prompt_lengths):
+        assert torch.isnan(x).any() == False
+        x = x.detach()
+        prompt = prompt.detach()
+        prompt = self.prompt_proj(prompt)
+        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
+        prompt_mask = torch.unsqueeze(commons.sequence_mask(prompt_lengths, prompt.size(2)), 1).to(x.dtype)
+        # prompt_mask = ~commons.sequence_mask(prompt_lengths, prompt.size(2)).to(torch.bool)
+        x = self.pre(x)*x_mask
+        prompt = prompt*prompt_mask
+        # prompt = prompt.masked_fill(prompt_mask.t().unsqueeze(-1), 0)
+        assert torch.isnan(x).any() == False
+        x = self.enc(x,1,prompt.transpose(1,2),encoder_attention_mask=prompt_mask).sample
+        assert torch.isnan(x).any() == False
+        x = x*x_mask
+        return x
 
 class TextEncoder(nn.Module):
     def __init__(
@@ -539,6 +584,35 @@ class PosteriorEncoder(nn.Module):
         z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
         return z, m, logs, x_mask
 
+
+
+class MultiPeriodDiscriminator(torch.nn.Module):
+    def __init__(self, use_spectral_norm=False):
+        super(MultiPeriodDiscriminator, self).__init__()
+        periods = [2, 3, 5, 7, 11]
+
+        discs = [DiscriminatorS(use_spectral_norm=use_spectral_norm)]
+        discs = discs + [
+            DiscriminatorP(i, use_spectral_norm=use_spectral_norm) for i in periods
+        ]
+        self.discriminators = nn.ModuleList(discs)
+
+    def forward(self, y, y_hat):
+        y_d_rs = []
+        y_d_gs = []
+        fmap_rs = []
+        fmap_gs = []
+        for i, d in enumerate(self.discriminators):
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
+
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+
 class ReferenceEncoder(nn.Module):
     """
     inputs --- [N, Ty/r, n_mels*r]  mels
@@ -681,8 +755,11 @@ class VITS(nn.Module):
         # self.sdp = StochasticDurationPredictor(
         #     hidden_channels, 192, 3, 0.5, 4
         # )
-        self.dp = DurationPredictor(
-            hidden_channels, 256, 3, 0.5
+        # self.dp = DurationPredictor(
+        #     hidden_channels, 256, 3, 0.5
+        # )
+        self.dp = DurationPredictor_unet(
+            hidden_channels, 256,spec_channels, 3, 0.5
         )
 
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
@@ -729,7 +806,8 @@ class VITS(nn.Module):
         # l_length_sdp = l_length_sdp / torch.sum(x_mask)
 
         logw_ = torch.log(w + 1e-6) * x_mask
-        logw = self.dp(x, x_mask)
+        # logw = self.dp(x, x_mask)
+        logw = self.dp(x, x_lengths, y, y_lengths)
         l_length_dp = torch.sum((logw - logw_) ** 2, [1, 2]) / torch.sum(
             x_mask
         )  # for averaging
@@ -749,12 +827,23 @@ class VITS(nn.Module):
         loss_kl_ph = 0
         l_length = torch.sum(l_length.float())
         return z, y_lengths,(l_length, loss_kl, loss_kl_ph)
+        # return (
+        #     o,
+        #     l_length,
+        #     attn,
+        #     ids_slice,
+        #     x_mask,
+        #     y_mask,
+        #     (z, z_p, m_p, logs_p, m_q, logs_q),
+        #     (x, logw, logw_),
+        # )
+
     def infer(
         self,
         x,
         x_lengths,
         y,
-        y_lenths,
+        y_lengths,
         tone,
         language,
         noise_scale=0.667,
@@ -771,7 +860,8 @@ class VITS(nn.Module):
         # logw = self.sdp(x, x_mask, reverse=True, noise_scale=noise_scale_w) * (
         #     sdp_ratio
         # ) + self.dp(x, x_mask) * (1 - sdp_ratio)
-        logw = self.dp(x, x_mask)
+        # logw = self.dp(x, x_mask)
+        logw = self.dp(x, x_lengths, y, y_lengths)
         w = torch.exp(logw) * x_mask * length_scale
         w_ceil = torch.ceil(w)
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
@@ -791,6 +881,8 @@ class VITS(nn.Module):
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
         z = self.flow(z_p, y_mask, reverse=True)
         return z,y
+        # o = self.dec((z * y_mask)[:, :, :max_len], g=g)
+        # return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
 def Conv1d(*args, **kwargs):
   layer = nn.Conv1d(*args, **kwargs)
