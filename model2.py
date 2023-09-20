@@ -542,6 +542,52 @@ class ResidualCouplingBlock(nn.Module):
                 x = flow(x, x_mask, g=g, reverse=reverse)
         return x
 
+class PosteriorEncoder_unet(nn.Module):
+    def __init__(self,
+        in_channels,
+        out_channels,
+        hidden_channels,
+        prompt_channels,
+        n_heads=8):
+        super().__init__()
+        self.conv_blocks = nn.ModuleList()
+        self.attn_blocks = nn.ModuleList()
+        self.norm = nn.ModuleList()
+        self.act = nn.ModuleList()
+        self.n_heads = n_heads
+        self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=1)
+        self.enc = UNet1DConditionModel(
+            in_channels=hidden_channels,
+            out_channels=out_channels,
+            block_out_channels=(hidden_channels//4,hidden_channels//2,hidden_channels,hidden_channels),
+            norm_num_groups=8,
+            cross_attention_dim=hidden_channels,
+            attention_head_dim=n_heads,
+            addition_embed_type='text',
+            resnet_time_scale_shift='scale_shift',
+        )
+        self.prompt_proj = nn.Conv1d(prompt_channels, hidden_channels,1)
+        self.proj = nn.Conv1d(out_channels, out_channels * 2, 1)
+        self.out_channels = out_channels
+    # MultiHeadAttention 
+    def forward(self, x, x_lengths, prompt, prompt_lengths):
+        assert torch.isnan(x).any() == False
+        x = x.detach()
+        prompt = prompt.detach()
+        prompt = self.prompt_proj(prompt)
+        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
+        prompt_mask = torch.unsqueeze(commons.sequence_mask(prompt_lengths, prompt.size(2)), 1).to(x.dtype)
+        # prompt_mask = ~commons.sequence_mask(prompt_lengths, prompt.size(2)).to(torch.bool)
+        x = self.pre(x)*x_mask
+        prompt = prompt*prompt_mask
+        # prompt = prompt.masked_fill(prompt_mask.t().unsqueeze(-1), 0)
+        assert torch.isnan(x).any() == False
+        x = self.enc(x,1,prompt.transpose(1,2),encoder_attention_mask=prompt_mask).sample
+        assert torch.isnan(x).any() == False
+        stats = self.proj(x*x_mask) * x_mask
+        m, logs = torch.split(stats, self.out_channels, dim=1)
+        z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
+        return z, m, logs, x_mask
 
 class PosteriorEncoder(nn.Module):
     def __init__(
@@ -724,34 +770,41 @@ class VITS(nn.Module):
             kernel_size,
             p_dropout,
         )
-        self.enc_q = PosteriorEncoder(
+
+        self.enc_q = PosteriorEncoder_unet(
             spec_channels,
             inter_channels,
             hidden_channels,
-            5,
-            1,
-            16,
+            spec_channels,
         )
-        if use_transformer_flow:
-            self.flow = TransformerCouplingBlock(
-                inter_channels,
-                hidden_channels,
-                filter_channels,
-                n_heads,
-                n_layers_trans_flow,
-                5,
-                p_dropout,
-                n_flow_layer,
-                share_parameter=flow_share_parameter,
-            )
-        else:
-            self.flow = ResidualCouplingBlock(
-                inter_channels,
-                hidden_channels,
-                5,
-                1,
-                n_flow_layer,
-            )
+        # self.enc_q = PosteriorEncoder(
+        #     spec_channels,
+        #     inter_channels,
+        #     hidden_channels,
+        #     5,
+        #     1,
+        #     16,
+        # )
+        # if use_transformer_flow:
+        #     self.flow = TransformerCouplingBlock(
+        #         inter_channels,
+        #         hidden_channels,
+        #         filter_channels,
+        #         n_heads,
+        #         n_layers_trans_flow,
+        #         5,
+        #         p_dropout,
+        #         n_flow_layer,
+        #         share_parameter=flow_share_parameter,
+        #     )
+        # else:
+        #     self.flow = ResidualCouplingBlock(
+        #         inter_channels,
+        #         hidden_channels,
+        #         5,
+        #         1,
+        #         n_flow_layer,
+        #     )
         # self.sdp = StochasticDurationPredictor(
         #     hidden_channels, 192, 3, 0.5, 4
         # )
@@ -766,8 +819,10 @@ class VITS(nn.Module):
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language
         )
-        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
-        z_p = self.flow(z, y_mask)
+        # z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
+        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, y, y_lengths)
+        # z_p = self.flow(z, y_mask)
+        z_p=z
 
         with torch.no_grad():
             # negative cross-entropy
@@ -879,7 +934,8 @@ class VITS(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        z = self.flow(z_p, y_mask, reverse=True)
+        # z = self.flow(z_p, y_mask, reverse=True)
+        z=z_p
         return z,y
         # o = self.dec((z * y_mask)[:, :, :max_len], g=g)
         # return o, attn, y_mask, (z, z_p, m_p, logs_p)
