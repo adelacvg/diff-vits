@@ -771,20 +771,20 @@ class VITS(nn.Module):
             p_dropout,
         )
 
-        self.enc_q = PosteriorEncoder_unet(
-            spec_channels,
-            inter_channels,
-            hidden_channels,
-            spec_channels,
-        )
-        # self.enc_q = PosteriorEncoder(
+        # self.enc_q = PosteriorEncoder_unet(
         #     spec_channels,
         #     inter_channels,
         #     hidden_channels,
-        #     5,
-        #     1,
-        #     16,
+        #     spec_channels,
         # )
+        self.enc_q = PosteriorEncoder(
+            spec_channels,
+            inter_channels,
+            hidden_channels,
+            5,
+            1,
+            16,
+        )
         # if use_transformer_flow:
         #     self.flow = TransformerCouplingBlock(
         #         inter_channels,
@@ -819,8 +819,8 @@ class VITS(nn.Module):
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language
         )
-        # z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
-        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, y, y_lengths)
+        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
+        # z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, y, y_lengths)
         # z_p = self.flow(z, y_mask)
         z_p=z
 
