@@ -358,6 +358,7 @@ class TextEncoder(nn.Module):
             gin_channels=self.gin_channels,
         )
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
+        self.spk_proj = nn.Conv1d(gin_channels, hidden_channels*2, 1)
 
     def forward(self, x, x_lengths, tone, language, g=None):
         x = (
@@ -371,6 +372,10 @@ class TextEncoder(nn.Module):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         )
+        #scale shift
+        scale_shift = self.spk_proj(g)
+        scale, shift = torch.split(scale_shift, self.hidden_channels, dim=1)
+        x = x*(1+scale) + shift
 
         x = self.encoder(x * x_mask, x_mask, g=g)
         stats = self.proj(x) * x_mask
@@ -544,12 +549,19 @@ class PosteriorEncoder(nn.Module):
             gin_channels=gin_channels,
         )
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
+        self.spk_proj = nn.Conv1d(gin_channels, hidden_channels*2, 1)
 
     def forward(self, x, x_lengths, g=None):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         )
         x = self.pre(x) * x_mask
+        
+        #scale shift
+        scale_shift = self.spk_proj(g)
+        scale, shift = torch.split(scale_shift, self.hidden_channels, dim=1)
+        x = x*(1+scale) + shift
+        
         x = self.enc(x, x_mask, g=g)
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
@@ -666,6 +678,7 @@ class VITS(nn.Module):
             n_layers,
             kernel_size,
             p_dropout,
+            gin_channels,
         )
 
         # self.enc_q = PosteriorEncoder_unet(
@@ -681,6 +694,7 @@ class VITS(nn.Module):
             5,
             1,
             16,
+            gin_channels,
         )
         # if use_transformer_flow:
         #     self.flow = TransformerCouplingBlock(
@@ -711,12 +725,14 @@ class VITS(nn.Module):
         self.dp = DurationPredictor_unet(
             hidden_channels, 256,spec_channels, 3, 0.5
         )
+        self.ref_enc = TextTimeEmbedding(spec_channels, gin_channels,1)
 
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
+        g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
-            x, x_lengths, tone, language
+            x, x_lengths, tone, language, g
         )
-        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
+        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths,g)
         # z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, y, y_lengths)
         # z_p = self.flow(z, y_mask)
         z_p=z
@@ -806,8 +822,9 @@ class VITS(nn.Module):
     ):
         # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, tone, language, bert)
         # g = self.gst(y)
+        g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
-            x, x_lengths, tone, language
+            x, x_lengths, tone, language, g
         )
         # logw = self.sdp(x, x_mask, reverse=True, noise_scale=noise_scale_w) * (
         #     sdp_ratio
@@ -1245,7 +1262,7 @@ class NaturalSpeech2(nn.Module):
         loss_diff = loss_diff.mean()
 
         l_length, loss_kl, loss_kl_ph = losses
-        loss = 40*loss_diff + 10*l_length + 10*loss_kl + 10*loss_kl_ph
+        loss = 40*loss_diff + l_length + loss_kl + loss_kl_ph
 
 
         return loss, loss_diff, l_length, loss_kl, loss_kl_ph, model_out, target
