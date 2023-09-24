@@ -696,26 +696,27 @@ class VITS(nn.Module):
             16,
             gin_channels,
         )
-        # if use_transformer_flow:
-        #     self.flow = TransformerCouplingBlock(
-        #         inter_channels,
-        #         hidden_channels,
-        #         filter_channels,
-        #         n_heads,
-        #         n_layers_trans_flow,
-        #         5,
-        #         p_dropout,
-        #         n_flow_layer,
-        #         share_parameter=flow_share_parameter,
-        #     )
-        # else:
-        #     self.flow = ResidualCouplingBlock(
-        #         inter_channels,
-        #         hidden_channels,
-        #         5,
-        #         1,
-        #         n_flow_layer,
-        #     )
+        if use_transformer_flow:
+            self.flow = TransformerCouplingBlock(
+                inter_channels,
+                hidden_channels,
+                filter_channels,
+                n_heads,
+                n_layers_trans_flow,
+                5,
+                p_dropout,
+                n_flow_layer,
+                gin_channels=gin_channels,
+                share_parameter=flow_share_parameter,
+            )
+        else:
+            self.flow = ResidualCouplingBlock(
+                inter_channels,
+                hidden_channels,
+                5,
+                1,
+                n_flow_layer,
+            )
         # self.sdp = StochasticDurationPredictor(
         #     hidden_channels, 192, 3, 0.5, 4
         # )
@@ -734,8 +735,8 @@ class VITS(nn.Module):
         )
         z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths,g)
         # z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, y, y_lengths)
-        # z_p = self.flow(z, y_mask)
-        z_p=z
+        z_p = self.flow(z, y_mask,g)
+        # z_p=z
 
         with torch.no_grad():
             # negative cross-entropy
@@ -848,8 +849,8 @@ class VITS(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        # z = self.flow(z_p, y_mask, reverse=True)
-        z=z_p
+        z = self.flow(z_p, y_mask,g, reverse=True)
+        # z=z_p
         return z,y
         # o = self.dec((z * y_mask)[:, :, :max_len], g=g)
         # return o, attn, y_mask, (z, z_p, m_p, logs_p)

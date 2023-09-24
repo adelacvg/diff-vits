@@ -1,6 +1,6 @@
 {
   "train": {
-    "train_batch_size":8,
+    "train_batch_size":32,
     "gradient_accumulate_every": 1,
     "train_lr": 0.0001,
     "train_num_steps": 1000000,
@@ -17,7 +17,7 @@
       0.8,
       0.99
     ],
-    "num_workers": 16,
+    "num_workers": 32,
     "eps": 1e-09,
     "keep_ckpts": 3
   },
@@ -32,7 +32,7 @@
     "min_text_len": 1,
     "max_text_len": 300,
     "win_length": 2048,
-    "n_mel_channels": 128,
+    "n_mel_channels": 100,
     "mel_fmin": 0.0,
     "mel_fmax": null,
     "cleaned_text": true
