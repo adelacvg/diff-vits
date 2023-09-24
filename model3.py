@@ -738,10 +738,10 @@ class VITS(nn.Module):
             hidden_channels, 256, 100, 3, 0.5
         )
         self.ref_enc = SpeakerEncoder(100,2,gin_channels,gin_channels)
-        # self.ref_enc = TextTimeEmbedding(100, gin_channels,1)
+        self.ref_enc1 = TextTimeEmbedding(100, gin_channels,1)
 
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
-        g = self.ref_enc(y).unsqueeze(-1)
+        g = self.ref_enc(y).unsqueeze(-1) + self.ref_enc1(y.transpose(1, 2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, g
         )
@@ -808,16 +808,7 @@ class VITS(nn.Module):
         loss_kl_ph = 0
         l_length = torch.sum(l_length.float())
         return z, y_lengths,(l_length, loss_kl, loss_kl_ph)
-        # return (
-        #     o,
-        #     l_length,
-        #     attn,
-        #     ids_slice,
-        #     x_mask,
-        #     y_mask,
-        #     (z, z_p, m_p, logs_p, m_q, logs_q),
-        #     (x, logw, logw_),
-        # )
+
 
     def infer(
         self,
@@ -864,8 +855,6 @@ class VITS(nn.Module):
         # z = self.flow(z_p, y_mask,g, reverse=True)
         z=z_p
         return z,y
-        # o = self.dec((z * y_mask)[:, :, :max_len], g=g)
-        # return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
 def Conv1d(*args, **kwargs):
   layer = nn.Conv1d(*args, **kwargs)
@@ -906,12 +895,15 @@ class Diffusion_Encoder(nn.Module):
     self.spec_channels = 513
     self.prompt_encoder = PromptEncoder(100, hidden_channels, hidden_channels,4,0.2)
     print('prompt enc params: ', count_parameters(self.prompt_encoder))
+    self.pre = PromptEncoder(hidden_channels, hidden_channels*2, hidden_channels, 6, 0.2)
 
   def forward(self, x, data, t):
     assert torch.isnan(x).any() == False
     cond, prompt, cond_lengths, prompt_lengths = data
     prompt_mask = torch.unsqueeze(commons.sequence_mask(prompt_lengths, prompt.size(2)), 1).to( x.dtype)
     prompt = self.prompt_encoder(prompt, prompt_lengths)*prompt_mask
+    cond = self.pre(cond, cond_lengths)
+
     x = torch.cat([x, cond], dim=1)
 
     # x_mask = commons.sequence_mask(contentvec_lengths, x.size(2)).to(torch.bool)
@@ -1257,7 +1249,11 @@ class NaturalSpeech2(nn.Module):
         b, d, n, device = *spec_padded.shape, spec_padded.device
         # get pre model outputs
         content, lengths, losses = self.vits(text_padded, text_lengths, spec_padded, spec_lengths, tone_padded, language_padded)
-        content, lengths, refer, refer_lengths, x_start = content, lengths, refer1_padded, refer1_lengths, spec_padded
+        content, lengths, x_start = content, lengths, spec_padded
+        if torch.rand(1)<0.5:
+            refer, refer_lengths = refer1_padded, refer1_lengths
+        else:
+            refer, refer_lengths = refer2_padded, refer2_lengths
 
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
         x_mask = torch.unsqueeze(commons.sequence_mask(lengths, content.size(2)), 1).to(spec_padded.dtype)
