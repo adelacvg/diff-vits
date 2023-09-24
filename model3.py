@@ -740,6 +740,14 @@ class VITS(nn.Module):
         self.ref_enc = SpeakerEncoder(100,2,gin_channels,gin_channels)
         self.ref_enc1 = TextTimeEmbedding(100, gin_channels,1)
 
+        self.o_proj = modules.WN(
+            inter_channels,
+            5,
+            1,
+            n_layers,
+            gin_channels=gin_channels,
+        )
+
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
         g = self.ref_enc(y).unsqueeze(-1) + self.ref_enc1(y.transpose(1, 2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
@@ -807,6 +815,7 @@ class VITS(nn.Module):
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
         loss_kl_ph = 0
         l_length = torch.sum(l_length.float())
+        z = self.o_proj(z,y_mask,g)
         return z, y_lengths,(l_length, loss_kl, loss_kl_ph)
 
 
@@ -854,6 +863,7 @@ class VITS(nn.Module):
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
         # z = self.flow(z_p, y_mask,g, reverse=True)
         z=z_p
+        z = self.o_proj(z,y_mask,g)
         return z,y
 
 def Conv1d(*args, **kwargs):
@@ -895,14 +905,12 @@ class Diffusion_Encoder(nn.Module):
     self.spec_channels = 513
     self.prompt_encoder = PromptEncoder(100, hidden_channels, hidden_channels,4,0.2)
     print('prompt enc params: ', count_parameters(self.prompt_encoder))
-    self.pre = PromptEncoder(hidden_channels, hidden_channels*2, hidden_channels, 6, 0.2)
 
   def forward(self, x, data, t):
     assert torch.isnan(x).any() == False
     cond, prompt, cond_lengths, prompt_lengths = data
     prompt_mask = torch.unsqueeze(commons.sequence_mask(prompt_lengths, prompt.size(2)), 1).to( x.dtype)
     prompt = self.prompt_encoder(prompt, prompt_lengths)*prompt_mask
-    cond = self.pre(cond, cond_lengths)
 
     x = torch.cat([x, cond], dim=1)
 
@@ -949,29 +957,6 @@ def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
-def rand_slice(z, spec, z_lengths, mel_padded):
-    content_lengths = torch.zeros_like(z_lengths)
-    prompt_lengths = torch.zeros_like(z_lengths)
-    prompt = torch.zeros_like(spec)
-    content = torch.zeros_like(z)
-    x_start = torch.zeros_like(mel_padded)
-    for i,len_z in enumerate(z_lengths):
-        l = random.randint(int(len_z//3), int(len_z//3*2))
-        u = random.randint(0, len_z-l)
-        v = u + l
-        if torch.rand(1)<0.5:
-            content_lengths[i] = len_z-l
-            prompt_lengths[i] = l
-            prompt[i,:, :v-u] += spec[i, :, u:v]
-            content[i,:,:len_z-v+u] += torch.cat([z[i,:, :u], z[i,:, v:len_z]], dim=-1)
-            x_start[i,:,:len_z-v+u] += torch.cat([mel_padded[i,:, :u], mel_padded[i,:, v:len_z]], dim=-1)
-        else:
-            content_lengths[i] = l
-            prompt_lengths[i]=len_z-l
-            prompt[i,:,:len_z-v+u] += torch.cat([spec[i,:, :u], spec[i,:, v:len_z]], dim=-1) 
-            content[i, :, :v-u] += z[i,:,u:v]
-            x_start[i, :, :v-u] += mel_padded[i,:,u:v]          
-    return content, content_lengths, prompt, prompt_lengths, x_start
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 class NaturalSpeech2(nn.Module):
     def __init__(self,

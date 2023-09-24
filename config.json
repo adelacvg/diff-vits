@@ -53,7 +53,7 @@
     "hidden_channels": 256,
     "filter_channels": 256,
     "n_heads": 2,
-    "n_layers": 6,
+    "n_layers": 12,
     "kernel_size": 3,
     "p_dropout": 0.1,
     "n_layers_q": 4,
