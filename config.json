@@ -1,6 +1,6 @@
 {
   "train": {
-    "train_batch_size":32,
+    "train_batch_size":16,
     "gradient_accumulate_every": 1,
     "train_lr": 0.0001,
     "train_num_steps": 1000000,

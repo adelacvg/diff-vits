@@ -744,7 +744,7 @@ class VITS(nn.Module):
             inter_channels,
             5,
             1,
-            n_layers,
+            n_layers*2,
             # gin_channels=gin_channels,
         )
 
