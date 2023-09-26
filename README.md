@@ -1,9 +1,8 @@
 
-# Bert-ns2(WIP)
+# Diff-VITS(WIP)
 
-# Better ns2 for zero shot tts.
+# VITS with diffusion for zero shot tts.
 
-## Unofficial implementation of <a href="https://arxiv.org/pdf/2304.09116.pdf">NaturalSpeech2</a> for Text To Speech
 ### Dataset
 You should put your dataset in the dataset folder, and the dataset should be organized as follows:
 
