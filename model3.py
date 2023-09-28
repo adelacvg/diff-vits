@@ -689,7 +689,7 @@ class VITS(nn.Module):
             n_layers,
             kernel_size,
             p_dropout,
-            # gin_channels,
+            gin_channels,
         )
 
         # self.enc_q = PosteriorEncoder_unet(
@@ -705,29 +705,29 @@ class VITS(nn.Module):
             5,
             1,
             16,
-            # gin_channels,
+            gin_channels,
         )
-        if use_transformer_flow:
-            self.flow = TransformerCouplingBlock(
-                inter_channels,
-                hidden_channels,
-                filter_channels,
-                n_heads,
-                n_layers_trans_flow,
-                5,
-                p_dropout,
-                n_flow_layer,
-                # gin_channels=gin_channels,
-                share_parameter=flow_share_parameter,
-            )
-        else:
-            self.flow = ResidualCouplingBlock(
-                inter_channels,
-                hidden_channels,
-                5,
-                1,
-                n_flow_layer,
-            )
+        # if use_transformer_flow:
+        #     self.flow = TransformerCouplingBlock(
+        #         inter_channels,
+        #         hidden_channels,
+        #         filter_channels,
+        #         n_heads,
+        #         n_layers_trans_flow,
+        #         5,
+        #         p_dropout,
+        #         n_flow_layer,
+        #         # gin_channels=gin_channels,
+        #         share_parameter=flow_share_parameter,
+        #     )
+        # else:
+        #     self.flow = ResidualCouplingBlock(
+        #         inter_channels,
+        #         hidden_channels,
+        #         5,
+        #         1,
+        #         n_flow_layer,
+        #     )
         # self.sdp = StochasticDurationPredictor(
         #     hidden_channels, 192, 3, 0.5, 4
         # )
@@ -737,7 +737,7 @@ class VITS(nn.Module):
         self.dp = DurationPredictor_unet(
             hidden_channels, 256, 100, 3, 0.5
         )
-        # self.ref_enc = SpeakerEncoder(100,2,gin_channels,gin_channels)
+        self.ref_enc = SpeakerEncoder(100,2,gin_channels,gin_channels)
         # self.ref_enc1 = TextTimeEmbedding(100, gin_channels,1)
 
         self.o_proj = modules.WN(
@@ -745,18 +745,18 @@ class VITS(nn.Module):
             5,
             1,
             n_layers*2,
-            # gin_channels=gin_channels,
+            gin_channels=gin_channels,
         )
 
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
-        # g = self.ref_enc(y).unsqueeze(-1) + self.ref_enc1(y.transpose(1, 2)).unsqueeze(-1)
+        g = self.ref_enc(y).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
-            x, x_lengths, tone, language
+            x, x_lengths, tone, language,g
         )
-        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
+        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g)
         # z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, y, y_lengths)
-        z_p = self.flow(z, y_mask)
-        # z_p=z
+        # z_p = self.flow(z, y_mask)
+        z_p=z
 
         with torch.no_grad():
             # negative cross-entropy
@@ -815,7 +815,7 @@ class VITS(nn.Module):
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
         loss_kl_ph = 0
         l_length = torch.sum(l_length.float())
-        z = self.o_proj(z,y_mask)
+        z = self.o_proj(z,y_mask,g)
         return z, y_lengths,(l_length, loss_kl, loss_kl_ph)
 
 
@@ -835,9 +835,9 @@ class VITS(nn.Module):
     ):
         # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, tone, language, bert)
         # g = self.gst(y)
-        # g = self.ref_enc(y).unsqueeze(-1)
+        g = self.ref_enc(y).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
-            x, x_lengths, tone, language
+            x, x_lengths, tone, language, g
         )
         # logw = self.sdp(x, x_mask, reverse=True, noise_scale=noise_scale_w) * (
         #     sdp_ratio
@@ -861,9 +861,9 @@ class VITS(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        z = self.flow(z_p, y_mask, reverse=True)
-        # z=z_p
-        z = self.o_proj(z,y_mask)
+        # z = self.flow(z_p, y_mask, reverse=True)
+        z=z_p
+        z = self.o_proj(z,y_mask,g)
         return z,y
 
 def Conv1d(*args, **kwargs):
