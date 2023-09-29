@@ -3,6 +3,7 @@ import re
 import argparse
 from string import punctuation
 from vocos import Vocos
+import commons
 
 import torch
 import torchaudio
@@ -12,88 +13,44 @@ import numpy as np
 import os
 from torch.utils.data import DataLoader
 from g2p_en import G2p
-from model import NaturalSpeech2
+from model3 import NaturalSpeech2
 from pypinyin import pinyin, Style
 
-from ema_pytorch import EMA
-from text import text_to_sequence
+from text import cleaned_text_to_sequence, get_bert
+from text.cleaner import clean_text
 
-
-def read_lexicon(lex_path):
-    lexicon = {}
-    with open(lex_path) as f:
-        for line in f:
-            temp = re.split(r"\s+", line.strip("\n"))
-            word = temp[0]
-            phones = temp[1:]
-            if word.lower() not in lexicon:
-                lexicon[word.lower()] = phones
-    return lexicon
-
-
-def preprocess_english(text, preprocess_config):
-    text = text.rstrip(punctuation)
-    lexicon = read_lexicon('./lexicons/librispeech-lexicon.txt')
-
-    g2p = G2p()
-    phones = []
-    words = re.split(r"([,;.\-\?\!\s+])", text)
-    for w in words:
-        if w.lower() in lexicon:
-            phones += lexicon[w.lower()]
-        else:
-            phones += list(filter(lambda p: p != " ", g2p(w)))
-    phones = "{" + "}{".join(phones) + "}"
-    phones = re.sub(r"\{[^\w\s]?\}", "{sp}", phones)
-    phones = phones.replace("}{", " ")
+def preprocess(text, preprocess_config):
+    text = text.strip()
+    language="ZH"
+    add_blank = True
+    norm_text, phones, tones, word2ph = clean_text(text, language)
 
     print("Raw Text Sequence: {}".format(text))
     print("Phoneme Sequence: {}".format(phones))
-    cleaners = ["english_cleaners"]
-    sequence = np.array(
-        text_to_sequence(
-            phones, cleaners
-        )
-    )
+    word2ph = [i for i in word2ph]
+    phone, tone, language = cleaned_text_to_sequence(phones, tones, language)
 
-    return np.array(sequence)
-
-
-def preprocess_mandarin(text, preprocess_config):
-    lexicon = read_lexicon('./mandarin_mfa_tools/simple.txt')
-
-    phones = []
-    pinyins = [
-        p[0]
-        for p in pinyin(
-            text, style=Style.TONE3, strict=False, neutral_tone_with_five=True
-        )
-    ]
-    for p in pinyins:
-        if p in lexicon:
-            phones += lexicon[p]
-        else:
-            phones.append("sp")
-
-    phones = "{" + " ".join(phones) + "}"
-    print("Raw Text Sequence: {}".format(text))
-    print("Phoneme Sequence: {}".format(phones))
-    cleaners = []
-    sequence = np.array(
-        text_to_sequence(
-            phones, cleaners
-        )
-    )
-
-    return np.array(sequence)
+    if add_blank:
+        phone = commons.intersperse(phone, 0)
+        tone = commons.intersperse(tone, 0)
+        language = commons.intersperse(language, 0)
+        for i in range(len(word2ph)):
+            word2ph[i] = word2ph[i] * 2
+        word2ph[0] += 1
+    phone = torch.LongTensor(phone)
+    tone = torch.LongTensor(tone)
+    language = torch.LongTensor(language)
+    return phone, tone, language
 
 
 def synthesize(model, cfg, vocos, batchs, control_values, device):
     pitch_control, energy_control, duration_control = control_values
 
     for batch in batchs:
-        phoneme, refer_path, phoneme_length = batch 
-        phoneme = torch.LongTensor(phoneme).to(device)
+        phoneme, tone, language, refer_path, phoneme_length = batch 
+        phoneme =phoneme.to(device)
+        tone = tone.to(device)
+        language = language.to(device)
         phoneme_length = torch.LongTensor(phoneme_length).to(device)
         refer_audio,sr = torchaudio.load(refer_path)
         refer_audio24k = T.Resample(sr, 24000)(refer_audio)
@@ -111,7 +68,8 @@ def synthesize(model, cfg, vocos, batchs, control_values, device):
         refer_length = torch.tensor([refer.size(1)]).to(device)
         # print(refer.shape)
         with torch.no_grad():
-            samples,mel = model.sample(phoneme, refer, phoneme_length, refer_length, vocos)
+            samples, mel = model.sample(phoneme, refer, phoneme_length, refer_length,\
+                                tone, language, vocos)
             samples = samples.detach().cpu()
     return samples
 def load_model(model_path, device, cfg):
@@ -120,17 +78,14 @@ def load_model(model_path, device, cfg):
     model.load_state_dict(data['model'])
 
     model.to(device)
-    ema = EMA(model)
-    ema.to(device)
-    ema.load_state_dict(data["ema"])
-    return ema.ema_model.eval()
+    return model.eval()
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--text",
         type=str,
-        default="你好再见",
+        default="你好，再见。",
         help="raw text to synthesize, for single-sentence mode only",
     )
     parser.add_argument(
@@ -143,7 +98,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--refer",
         type=str,
-        default="test1.wav",
+        default="138.wav",
         help="reference audio path for single-sentence mode only",
     )
     parser.add_argument(
@@ -152,7 +107,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         # "-m", "--model_path", type=str, default="logs/tts/model-1000.pt", help="path to model.pt"
-        "-m", "--model_path", type=str, default="logs/tts/2023-08-29-10-58-23/model-18.pt", help="path to model.pt"
+        "-m", "--model_path", type=str, default="logs/tts/2023-09-28-19-43-44/model-172.pt", help="path to model.pt"
     )
     parser.add_argument(
         "--pitch_control",
@@ -175,7 +130,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:0",
+        default="cuda:2",
         help="specify the device, cpu or cuda",
     )
     args = parser.parse_args()
@@ -195,15 +150,13 @@ if __name__ == "__main__":
     vocos = Vocos.from_pretrained("charactr/vocos-mel-24khz")
 
     ids = raw_texts = [args.text[:100]]
-    if args.lang == "en":
-        texts = np.array([preprocess_english(args.text, cfg)])
-    elif args.lang == "zh":
-        texts = np.array([preprocess_mandarin(args.text, cfg)])
-    text_lens = np.array([len(texts[0])])
+    phone, tone, language = preprocess(args.text, cfg)
+    phone, tone, language = phone.unsqueeze(0), tone.unsqueeze(0), language.unsqueeze(0)
+    text_lens = np.array([len(phone[0])])
     raw_path = 'raw'
     refer_name = args.refer
     refer_path = f"{raw_path}/{refer_name}"
-    batchs = [( texts,refer_path,text_lens)]
+    batchs = [( phone, tone, language,refer_path,text_lens)]
 
     control_values = args.pitch_control, args.energy_control, args.duration_control
 
