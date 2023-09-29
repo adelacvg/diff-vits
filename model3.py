@@ -372,10 +372,7 @@ class TextEncoder(nn.Module):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         )
-        #scale shift
-        # scale_shift = self.spk_proj(g)
-        # scale, shift = torch.split(scale_shift, self.hidden_channels, dim=1)
-        # x = x*(1+scale) + shift
+
 
         x = self.encoder(x * x_mask, x_mask, g=g)
         stats = self.proj(x) * x_mask
@@ -737,8 +734,8 @@ class VITS(nn.Module):
         self.dp = DurationPredictor_unet(
             hidden_channels, 256, 100, 3, 0.5
         )
-        self.ref_enc = SpeakerEncoder(100,2,gin_channels,gin_channels)
-        # self.ref_enc1 = TextTimeEmbedding(100, gin_channels,1)
+        # self.ref_enc = SpeakerEncoder(100,2,gin_channels,gin_channels)
+        self.ref_enc = TextTimeEmbedding(100, gin_channels,1)
 
         self.o_proj = modules.WN(
             inter_channels,
@@ -749,7 +746,7 @@ class VITS(nn.Module):
         )
 
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
-        g = self.ref_enc(y).unsqueeze(-1)
+        g = self.ref_enc(y.transpose(1,2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language,g
         )
@@ -791,27 +788,18 @@ class VITS(nn.Module):
 
         w = attn.sum(2)
 
-        # l_length_sdp = self.sdp(x, x_mask, w)
-        # l_length_sdp = l_length_sdp / torch.sum(x_mask)
-
         logw_ = torch.log(w + 1e-6) * x_mask
-        # logw = self.dp(x, x_mask)
         logw = self.dp(x, x_lengths, y, y_lengths)
         l_length_dp = torch.sum((logw - logw_) ** 2, [1, 2]) / torch.sum(
             x_mask
         )  # for averaging
 
-        # l_length = l_length_dp + l_length_sdp
         l_length = l_length_dp
 
         # expand prior
         m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
         logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
 
-        # z_slice, ids_slice = commons.rand_slice_segments(
-        #     z, y_lengths, self.segment_size
-        # )
-        # o = self.dec(z_slice, g=g)
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
         loss_kl_ph = 0
         l_length = torch.sum(l_length.float())
@@ -833,9 +821,7 @@ class VITS(nn.Module):
         max_len=None,
         sdp_ratio=0,
     ):
-        # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, tone, language, bert)
-        # g = self.gst(y)
-        g = self.ref_enc(y).unsqueeze(-1)
+        g = self.ref_enc(y.transpose(1,2)).unsqueeze(-1)
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, g
         )
@@ -1335,7 +1321,7 @@ class Trainer(object):
             return
         data = {
             'step': self.step,
-            'model': self.model.state_dict(),
+            'model': self.accelerator.get_state_dict(self.model),
         }
         torch.save(data, str(self.logs_folder / f'model-{milestone}.pt'))
 
@@ -1349,13 +1335,6 @@ class Trainer(object):
 
         saved_state_dict = data['model']
         model = self.accelerator.unwrap_model(self.model)
-        # new_state_dict= {}
-        # for k,v in saved_state_dict.items():
-        #     name=k[7:]
-        #     new_state_dict[name] = v
-        # if hasattr(model, 'module'):
-        #     model.module.load_state_dict(new_state_dict)
-        # else:
         model.load_state_dict(saved_state_dict)
 
 
