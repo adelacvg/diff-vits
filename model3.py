@@ -386,7 +386,8 @@ class PromptEncoder(nn.Module):
       out_channels=128,
       n_layers=6,
       p_dropout=0.2,
-      last_ln = True,):
+      last_ln = True,
+      gin_channels=None):
         super().__init__()
         self.arch = [8 for _ in range(n_layers)]
         self.num_layers = n_layers
@@ -405,9 +406,14 @@ class PromptEncoder(nn.Module):
             self.layer_norm = LayerNorm(out_channels)
         self.pre = ConvLayer(in_channels, hidden_channels, 1, p_dropout)
         self.out_proj = ConvLayer(hidden_channels, out_channels, 1)
+        if gin_channels is not None:
+            self.g_proj = nn.Conv1d(gin_channels, in_channels, 1)
 
-    def forward(self, src_tokens, lengths=None):
+    def forward(self, src_tokens, lengths, g=None):
         # B x C x T -> T x B x C
+        if g is not None:
+            g = self.g_proj(g)
+            src_tokens = src_tokens + g
         src_tokens = rearrange(src_tokens, 'b c t -> t b c')
         # compute padding mask
         encoder_padding_mask = ~commons.sequence_mask(lengths, src_tokens.size(0)).to(torch.bool)
@@ -737,13 +743,14 @@ class VITS(nn.Module):
         # self.ref_enc = SpeakerEncoder(100,2,gin_channels,gin_channels)
         self.ref_enc = TextTimeEmbedding(100, gin_channels,1)
 
-        self.o_proj = modules.WN(
-            inter_channels,
-            5,
-            1,
-            n_layers*2,
-            gin_channels=gin_channels,
-        )
+        # self.o_proj = modules.WN(
+        #     inter_channels,
+        #     5,
+        #     1,
+        #     n_layers*2,
+        #     gin_channels=gin_channels,
+        # )
+        self.o_proj = PromptEncoder(inter_channels, hidden_channels, inter_channels,6,0.2,gin_channels = gin_channels)
 
     def forward(self, x, x_lengths, y, y_lengths, tone, language):
         g = self.ref_enc(y.transpose(1,2)).unsqueeze(-1)
@@ -803,7 +810,7 @@ class VITS(nn.Module):
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
         loss_kl_ph = 0
         l_length = torch.sum(l_length.float())
-        z = self.o_proj(z,y_mask,g)
+        z = self.o_proj(z,y_lengths,g)
         return z, y_lengths,(l_length, loss_kl, loss_kl_ph)
 
 
@@ -849,7 +856,7 @@ class VITS(nn.Module):
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
         # z = self.flow(z_p, y_mask, reverse=True)
         z=z_p
-        z = self.o_proj(z,y_mask,g)
+        z = self.o_proj(z,y_lengths,g)
         return z,y
 
 def Conv1d(*args, **kwargs):
